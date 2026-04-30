@@ -143,7 +143,7 @@ my-claudio/                    ← 你 git clone 下来的目录
 1. **选择你想用的"大脑"** —— Claudio 支持三种 CLI 三选一（**三个是独立命令**，挑你已订阅/已装的）：
    - **CodeBuddy CLI**（默认，命令 `codebuddy`）
    - **Claude Code 官方**（命令 `claude`）
-   - **Claude Internal**（命令 `claude-internal`，腾讯内部分发）
+   - **Claude Internal**（命令 `claude-internal`）
 
    选完一个，确保对应 CLI 已 **登录**（命令进交互界面 → `/login`）。
 

@@ -10,7 +10,7 @@
 
 Claudio 是一个跑在用户本机的 AI 电台。架构：
 - **大脑**：CodeBuddy CLI 调用，输出 JSON `{say, play[]}`
-- **曲库**：本地 QQMusicApi 服务（`http://127.0.0.1:3300`）+ 直连腾讯
+- **曲库**：本地 QQMusicApi 服务（`http://127.0.0.1:3300`）
 - **天气**：和风（可选）
 - **前端**：浏览器 PWA + WebSocket
 
