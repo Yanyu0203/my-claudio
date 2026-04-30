@@ -182,7 +182,7 @@ my-claudio/                    ← 你 git clone 下来的目录
 - [CodeBuddy](https://www.codebuddy.ai) — 大脑
 - [jsososo/QQMusicApi](https://github.com/jsososo/QQMusicApi) — 曲库本地化
 - [和风天气](https://dev.qweather.com) — 气象
-- 灵感原型 [Claudio 架构](https://www.anthropic.com/engineering/claude-code-best-practices) by Anthropic Code 社区
+- 灵感原型 by mmguo from douyin
 
 ---
 
