@@ -125,7 +125,7 @@ function connect() {
   ws = new WebSocket(`${proto}://${location.host}/stream`);
   ws.onopen = () => {
     setStatus('SYS // ONLINE', true);
-    showLoading('init');
+    // 不再立刻 showLoading('init')。先等 hello —— server 会告诉我们是恢复还是冷启动
   };
   ws.onclose = () => {
     setStatus('SYS // OFFLINE — RECONNECT 3s', false);
@@ -146,7 +146,17 @@ function send(type, data = {}) {
 
 function handleServer({ type, data }) {
   switch (type) {
+    case 'hello':
+      handleHello(data);
+      break;
     case 'status':
+      // silent=true 表示后台静默生成（prefetch / 用户口味更新触发）
+      // 这种情况绝对不能弹全屏 Loading 把当前播放界面盖了
+      if (data.silent) {
+        if (data.stage === 'thinking') setStatus('AI // PREP NEXT...', true);
+        if (data.stage === 'resolving') setStatus('AI // RESOLVING NEXT...', true);
+        break;
+      }
       if (data.stage === 'thinking') {
         setStatus('AI // THINKING...');
         showLoading('thinking');
@@ -176,6 +186,9 @@ function handleServer({ type, data }) {
         nextBlock = data;
         console.log(`[prefetch] 收到下一段（${data.songs.length} 首），等当前段播完`);
         prefetching = false;
+        // 给用户一个轻微提示：新一段已就绪（不打断当前播放）
+        const firstTwo = data.songs.slice(0, 2).map((s) => s.title).join('、');
+        pushDjLog(`（下一段已备好：${firstTwo}…）`);
         return;
       }
 
@@ -187,6 +200,13 @@ function handleServer({ type, data }) {
       showDjSay(data.text);
       pushDjLog(data.text);
       break;
+    case 'control':
+      // 服务端要求执行某个动作（目前只有 skip）
+      if (data.action === 'skip') {
+        if (current) send('played', { title: current.title, artist: current.artist });
+        playNext();
+      }
+      break;
     case 'error':
       setStatus('ERR // ' + data.message);
       hideLoading();
@@ -196,23 +216,100 @@ function handleServer({ type, data }) {
 }
 
 // ============================================================
-// 播放
+// 连接握手（hello）：恢复会话 OR 冷启动
 // ============================================================
-function playNext() {
-  if (!queue.length) {
-    // 队列见底，请求下一段；等待期间显示 loading
-    showLoading('thinking');
-    send('request_block');
+let helloHandled = false; // 同一进程内只处理一次首屏恢复
+
+function handleHello(data) {
+  console.log('[hello]', data);
+
+  if (helloHandled) {
+    // 第二次以后（重连），如果 server 还有 session 就静默同步
+    if (data.resume && data.currentBlock) {
+      // 队列对齐：server 上的下标可能跟前端不一样（极少见，但防御一下）
+      console.log('[hello] 重连，server 仍持有 session，前端继续播');
+    }
     return;
   }
-  current = queue.shift();
-  audio.src = current.url;
-  audio.play().catch(() => setStatus('CLICK ▶ TO PLAY'));
+  helloHandled = true;
 
+  // 1. 拉历史聊天，无论 resume 与否
+  loadHistoryMessages();
+
+  if (data.resume && data.currentBlock) {
+    // ========== 恢复模式：电台还在播，浏览器只是来收听 ==========
+    hideLoading();
+    setStatus('SYS // ONLINE', true);
+    applyWeather(data.weather);
+    if (data.lastDjSay) showDjSay(data.lastDjSay);
+
+    const block = data.currentBlock;
+    const idx = Math.max(0, Math.min(data.currentIdx || 0, block.songs.length - 1));
+    queue = block.songs.slice(idx);
+    window.__currentBlockSongs = block.songs.length;
+    if (data.hasNextBlock) {
+      // server 已有 prefetch；前端不重复要
+      nextBlock = '__server_has__'; // 标记位，真东西在 server，等播完再请求
+    }
+
+    // 直接进入"播第一首"，但保留 server 报的进度
+    const restorePos = Math.max(0, data.currentPos || 0);
+    current = queue.shift();
+    renderCurrentSong();
+    audio.src = current.url;
+
+    // 等元数据加载好再 seek
+    const seekWhenReady = () => {
+      try {
+        if (restorePos && audio.duration && restorePos < audio.duration - 2) {
+          audio.currentTime = restorePos;
+          console.log(`[hello] 恢复进度到 ${restorePos.toFixed(0)}s`);
+        }
+      } catch (e) { console.warn('seek fail', e); }
+      audio.removeEventListener('loadedmetadata', seekWhenReady);
+    };
+    audio.addEventListener('loadedmetadata', seekWhenReady);
+
+    audio.play()
+      .then(() => console.log('[hello] ✓ 已开始播放（恢复）'))
+      .catch((err) => {
+        console.warn('[hello] ❌ autoplay 被拦', err.name);
+        setStatus('CLICK ▶ TO RESUME');
+        showDjSay('点 ▶ 继续刚才那段');
+      });
+
+    renderQueue();
+    document.title = `▶ ${current.title} — ${current.artist} // CLAUDIO`;
+    maybePrefetch();
+  } else {
+    // ========== 冷启动 / 还在编 ==========
+    showLoading(data.generating ? 'thinking' : 'init');
+  }
+}
+
+async function loadHistoryMessages() {
+  try {
+    const res = await fetch('/api/messages');
+    if (!res.ok) return;
+    const { messages } = await res.json();
+    if (!Array.isArray(messages) || !messages.length) return;
+    chatLog.innerHTML = ''; // 清掉，避免重复
+    messages.forEach((m) => {
+      if (m.role === 'user') appendLog('user', 'YOU', m.text);
+      else if (m.role === 'dj') appendLog('dj', 'DJ', m.text);
+    });
+    console.log(`[history] 恢复 ${messages.length} 条对话`);
+  } catch (e) {
+    console.warn('history fetch fail', e);
+  }
+}
+
+// 提取出来：渲染"现在播放区"（标题/封面），给 hello 恢复路径复用
+function renderCurrentSong() {
+  if (!current) return;
   titleEl.textContent = current.title;
   artistEl.textContent = current.artist + (current.album ? ` // ${current.album}` : '');
   reasonEl.textContent = current.reason || '';
-
   if (current.cover) {
     coverWrap.innerHTML = `<img src="${current.cover}" alt="" onerror="this.parentElement.classList.add('empty');this.remove();this.parentElement.textContent='NO ART';">`;
     coverWrap.classList.remove('empty');
@@ -222,9 +319,95 @@ function playNext() {
     coverWrap.classList.add('empty');
     coverWrap.classList.remove('playing');
   }
+}
 
+// ============================================================
+// 播放
+// ============================================================
+
+/**
+ * 应用一个 block：更新主题/字幕/队列，开始播放
+ */
+function consumeBlock(data) {
+  console.log(`[consumeBlock] ${data.songs.length} 首`, data.songs.map(s => s.title));
+  applyWeather(data.weather);
+  showDjSay(data.say);
+  pushDjLog(data.say);
+  queue = data.songs.slice();
+  window.__currentBlockSongs = data.songs.length; // 记下总数，给 song_advance 反推下标用
+  renderQueue();
+  if (data.failed?.length) console.warn('找不到的歌:', data.failed);
+  playNext();
+}
+
+function playNext() {
+  console.log(`[playNext] queue=${queue.length}, nextBlock=${nextBlock ? 'have' : 'no'}`);
+  if (!queue.length) {
+    // 优先用预拉的下一段
+    if (nextBlock && nextBlock !== '__server_has__') {
+      console.log('[prefetch] 用预拉的下一段，无缝衔接');
+      const nb = nextBlock;
+      nextBlock = null;
+      send('block_consumed'); // 告诉 server：用掉了 nextBlock
+      consumeBlock(nb);
+      return;
+    }
+    if (nextBlock === '__server_has__') {
+      // server 那边有 prefetch，但前端没缓存（恢复模式）→ 现去要
+      console.log('[prefetch] server 上的 prefetch 还没推过来，请求');
+      nextBlock = null;
+    }
+    // 没预拉 → 现去要
+    showLoading('thinking');
+    send('request_block');
+    return;
+  }
+  current = queue.shift();
+  console.log(`[play] 开始 [${current.title} - ${current.artist}]`);
+  audio.src = current.url;
+  audio.play()
+    .then(() => console.log('[play] ✓ 已开始播放'))
+    .catch((err) => {
+      console.warn('[play] ❌', err.name, err.message);
+      if (err.name === 'NotAllowedError') {
+        setStatus('CLICK ▶ TO PLAY');
+        showDjSay('浏览器拦截了自动播放，点 ▶ PLAY 开始');
+      } else {
+        setStatus('ERR // ' + err.message);
+      }
+    });
+
+  renderCurrentSong();
   renderQueue();
   document.title = `▶ ${current.title} — ${current.artist} // CLAUDIO`;
+
+  // 通知 server：切到了新一首（用于刷新恢复对位）
+  reportSongAdvance();
+
+  // 当前段还剩 ≤ 1 首未放，开始预拉下一段
+  maybePrefetch();
+}
+
+/**
+ * 当队列剩余 ≤ 1 首时，提前请求下一段
+ */
+function maybePrefetch() {
+  if (queue.length > 1) return;
+  if (nextBlock) return; // 已经有了（或占位符也不重复要）
+  if (prefetching) return;
+  prefetching = true;
+  console.log('[prefetch] 当前段快完，提前请求下一段');
+  send('request_block');
+}
+
+// 通知 server：切歌了。让 server 的 currentIdx 跟前端对齐
+function reportSongAdvance() {
+  // 估算当前是 block 里的第几首：用 queue 剩余反推不可靠（因为 queue 已经 shift 过了）
+  // 简单做法：让 server 自己维护下标，前端只发"我刚切到下一首"的信号
+  // 这里直接发"+1"语义：server 把 currentIdx++、currentPos 归零
+  // 用 pos=0 + 一个 idx 推算：发当前剩余队列长度，server 反推
+  const idxGuess = (window.__currentBlockSongs || 1) - queue.length - 1;
+  send('song_advance', { idx: Math.max(0, idxGuess) });
 }
 
 audio.addEventListener('ended', () => {
@@ -237,11 +420,21 @@ audio.addEventListener('timeupdate', () => {
   progressFill.style.width = dur ? (cur / dur * 100) + '%' : '0%';
   curTimeEl.textContent = fmtTime(cur);
   totTimeEl.textContent = fmtTime(dur);
+  // 节流：每 ~3s 上报一次播放位置
+  reportPosThrottled(cur);
 });
 audio.addEventListener('error', () => {
   console.warn('audio error, skip', current);
   playNext();
 });
+
+let lastPosReportAt = 0;
+function reportPosThrottled(pos) {
+  const now = Date.now();
+  if (now - lastPosReportAt < 3000) return;
+  lastPosReportAt = now;
+  send('pos_update', { pos });
+}
 function fmtTime(t) {
   if (!isFinite(t)) return '0:00';
   const m = Math.floor(t / 60);
@@ -291,7 +484,12 @@ chatForm.addEventListener('submit', (e) => {
   const text = chatInput.value.trim();
   if (!text) return;
   pushUserLog(text);
-  send('chat', { text });
+  // 把当前播放上下文一起带过去，让 DJ 能"看见"在播什么
+  send('chat', {
+    text,
+    nowPlaying: current ? { title: current.title, artist: current.artist } : null,
+    upNext: queue.slice(0, 5).map((s) => ({ title: s.title, artist: s.artist })),
+  });
   chatInput.value = '';
 });
 

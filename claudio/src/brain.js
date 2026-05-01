@@ -143,38 +143,175 @@ export async function callBrainJSON(prompt, opts = {}) {
 
 /**
  * 从任意文本里抽出第一个合法 JSON 对象 / 数组
+ *
+ * 兼容大脑常见输出问题：
+ *  - markdown 代码块包裹
+ *  - 字符串里带未转义的裸双引号（如 reason 里写了 "挺好"）→ 自动启发式修复
  */
 export function extractJSON(text) {
   if (!text) throw new Error('大脑返回空');
 
+  // 1. 优先尝试代码块（最常见的合法情况）
   const fence = text.match(/```(?:json)?\s*([\s\S]*?)```/i);
+  const candidates = [];
   if (fence) {
-    try {
-      return JSON.parse(fence[1].trim());
-    } catch {
-      /* 落到下面 */
+    candidates.push(fence[1].trim());
+    // 还要尝试"修复后再字符串感知截取"，应对 fence 内本身有裸引号导致截不全
+    const repaired = repairJSON(fence[1].trim());
+    const obj = sliceBalancedJSON(repaired, '{', '}');
+    if (obj) candidates.push(obj);
+    const arr = sliceBalancedJSON(repaired, '[', ']');
+    if (arr) candidates.push(arr);
+  }
+
+  // 2. 再从原文里字符串感知地找 {…} / […]
+  for (const [open, close] of [['{', '}'], ['[', ']']]) {
+    const found = sliceBalancedJSON(text, open, close);
+    if (found) candidates.push(found);
+  }
+
+  // 3. 兜底：先全文修复一次再找
+  const repaired = repairJSON(text);
+  if (repaired !== text) {
+    for (const [open, close] of [['{', '}'], ['[', ']']]) {
+      const found = sliceBalancedJSON(repaired, open, close);
+      if (found) candidates.push(found);
     }
   }
 
-  for (const [open, close] of [['{', '}'], ['[', ']']]) {
-    const start = text.indexOf(open);
-    if (start === -1) continue;
-    let depth = 0;
-    for (let i = start; i < text.length; i++) {
-      if (text[i] === open) depth++;
-      else if (text[i] === close) {
-        depth--;
-        if (depth === 0) {
-          const candidate = text.slice(start, i + 1);
-          try {
-            return JSON.parse(candidate);
-          } catch {
-            break;
-          }
-        }
-      }
+  // 4. 依次尝试解析（每个都试 raw + repair 两个版本，挑第一个 object 类型的成功结果）
+  let lastSuccess;
+  for (const raw of candidates) {
+    const parsed = tryParseWithRepair(raw);
+    if (parsed === undefined) continue;
+    // 优先返回 object（Claudio 都是顶层 object 结构）
+    if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+      return parsed;
     }
+    lastSuccess = parsed;
   }
+  if (lastSuccess !== undefined) return lastSuccess;
 
   throw new Error('从大脑返回里抽不出 JSON。原文前 500 字:\n' + text.slice(0, 500));
+}
+
+/**
+ * 字符串感知地切出第一个配对的 {…} 或 […]
+ * 在字符串内的 { } " 不影响计数
+ */
+function sliceBalancedJSON(text, open, close) {
+  const start = text.indexOf(open);
+  if (start === -1) return null;
+
+  let depth = 0;
+  let inStr = false;
+  let escape = false;
+
+  for (let i = start; i < text.length; i++) {
+    const ch = text[i];
+
+    if (escape) { escape = false; continue; }
+    if (ch === '\\' && inStr) { escape = true; continue; }
+    if (ch === '"') {
+      inStr = !inStr;
+      continue;
+    }
+    if (inStr) continue;
+
+    if (ch === open) depth++;
+    else if (ch === close) {
+      depth--;
+      if (depth === 0) return text.slice(start, i + 1);
+    }
+  }
+  return null;
+}
+
+/**
+ * 先直接 parse；失败就尝试启发式修复后再 parse
+ */
+function tryParseWithRepair(raw) {
+  try { return JSON.parse(raw); } catch (_) {}
+  const repaired = repairJSON(raw);
+  if (repaired !== raw) {
+    try { return JSON.parse(repaired); } catch (_) {}
+  }
+  return undefined;
+}
+
+/**
+ * 启发式修复常见裸引号问题
+ * 思路：JSON 字符串值的合法结尾只有 ",  ",\n  " }  " ]  " ：
+ *   遇到 " 后看后面第一个非空白字符，如果不是 [,}\]:] 也不是文件末尾，
+ *   就大概率是字符串中间的裸引号，转义掉。
+ *
+ * 同时修：
+ *   - 末尾未关闭的字符串
+ *   - 末尾未关闭的 { / [
+ *   - 缺失的 value（如 "taste_delta": <空>）补成 ""
+ *   - 末尾多余逗号
+ */
+function repairJSON(raw) {
+  let s = raw.trim();
+
+  // ---- 第 1 遍：扫描修裸引号 + 补未关闭字符串，并跟踪括号深度 ----
+  let out = '';
+  let inStr = false;
+  let escape = false;
+  const stack = []; // 跟踪 { [ 嵌套
+
+  for (let i = 0; i < s.length; i++) {
+    const ch = s[i];
+
+    if (escape) { out += ch; escape = false; continue; }
+    if (ch === '\\') { out += ch; escape = true; continue; }
+
+    if (ch === '"') {
+      if (!inStr) {
+        inStr = true;
+        out += ch;
+      } else {
+        // 在字符串里遇到 " —— 看下一个非空白字符
+        let j = i + 1;
+        while (j < s.length && /\s/.test(s[j])) j++;
+        const next = s[j];
+        if (next === ',' || next === '}' || next === ']' || next === ':' || j >= s.length) {
+          // 合法结尾
+          inStr = false;
+          out += ch;
+        } else {
+          // 裸引号 —— 转义
+          out += '\\"';
+        }
+      }
+      continue;
+    }
+
+    if (!inStr) {
+      if (ch === '{' || ch === '[') stack.push(ch);
+      else if (ch === '}' && stack[stack.length - 1] === '{') stack.pop();
+      else if (ch === ']' && stack[stack.length - 1] === '[') stack.pop();
+    }
+
+    out += ch;
+  }
+
+  // 末尾字符串没关
+  if (inStr) out += '"';
+
+  // ---- 第 2 遍：清理 + 补结构 ----
+  // 把"key":\s*$  补成 "key":""
+  out = out.replace(/("[^"\n]*"\s*:\s*)(?=\s*$)/m, '$1""');
+  // 把"key":\s*[}\]]  补成 "key":""<原来的>
+  out = out.replace(/("[^"\n]*"\s*:\s*)(?=[\s\n\r]*[}\]])/g, '$1""');
+  // 末尾多余逗号
+  out = out.replace(/,\s*([}\]])/g, '$1');
+
+  // 关掉所有还开着的 { [
+  while (stack.length) {
+    const open = stack.pop();
+    out += open === '{' ? '}' : ']';
+  }
+
+  return out;
 }

@@ -70,31 +70,55 @@ export function createQQMusic(opts = {}) {
       },
     };
 
-    const url = `${TENCENT_MUSICU}?data=${encodeURIComponent(JSON.stringify(payload))}`;
-    const res = await fetch(url, {
-      headers: {
-        Referer: 'https://y.qq.com',
-        'User-Agent':
-          'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36',
-      },
-    });
-    if (!res.ok) {
-      throw new Error(`腾讯搜歌 HTTP ${res.status}`);
-    }
-    const json = await res.json();
-    const list = json?.req_1?.data?.body?.song?.list || [];
+    // 带最多 3 次重试 + 退避（应对偶发的 code:2001 风控）
+    const MAX_RETRY = 3;
+    for (let attempt = 0; attempt < MAX_RETRY; attempt++) {
+      const url = `${TENCENT_MUSICU}?data=${encodeURIComponent(JSON.stringify(payload))}`;
+      const res = await fetch(url, {
+        headers: {
+          Referer: 'https://y.qq.com',
+          'User-Agent':
+            'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36',
+        },
+      });
+      if (!res.ok) {
+        if (attempt < MAX_RETRY - 1) {
+          await sleep(300 * (attempt + 1));
+          continue;
+        }
+        throw new Error(`腾讯搜歌 HTTP ${res.status}`);
+      }
+      const json = await res.json();
+      const r1 = json?.req_1 || {};
+      const list = r1?.data?.body?.song?.list || [];
 
-    return list.map((s) => ({
-      songmid: s.mid,
-      title: s.title || s.name,
-      artist: (s.singer || []).map((x) => x.name).join('/'),
-      album: s.album?.name || '',
-      albummid: s.album?.mid || '',
-      cover: s.album?.mid
-        ? `https://y.gtimg.cn/music/photo_new/T002R500x500M000${s.album.mid}.jpg`
-        : '',
-      duration: s.interval || 0, // 秒
-    }));
+      if (list.length > 0) {
+        return list.map((s) => ({
+          songmid: s.mid,
+          title: s.title || s.name,
+          artist: (s.singer || []).map((x) => x.name).join('/'),
+          album: s.album?.name || '',
+          albummid: s.album?.mid || '',
+          cover: s.album?.mid
+            ? `https://y.gtimg.cn/music/photo_new/T002R500x500M000${s.album.mid}.jpg`
+            : '',
+          duration: s.interval || 0,
+        }));
+      }
+      // 空结果 + code != 0 → 风控，退避重试
+      if (r1.code !== 0 && attempt < MAX_RETRY - 1) {
+        console.warn(`[qqmusic] search "${keyword}" 触发风控 code=${r1.code}, 退避 ${500 * (attempt + 1)}ms 重试 [${attempt + 1}/${MAX_RETRY}]`);
+        await sleep(500 * (attempt + 1));
+        continue;
+      }
+      // code=0 但确实没结果，或者重试用尽
+      return [];
+    }
+    return [];
+  }
+
+  function sleep(ms) {
+    return new Promise((r) => setTimeout(r, ms));
   }
 
   // ---------- 拿播放直链 ----------
