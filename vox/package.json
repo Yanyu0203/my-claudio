@@ -1,0 +1,29 @@
+{
+  "name": "vox",
+  "version": "0.1.0",
+  "description": "你的个人 AI 电台 · 跑在本地",
+  "type": "module",
+  "private": true,
+  "scripts": {
+    "start": "node server.js",
+    "dev": "cross-env VOX_DEBUG=1 CLAUDIO_DEBUG=1 node server.js",
+    "verify:qq": "node scripts/verify-qqmusic.js",
+    "bootstrap:taste": "node scripts/bootstrap-taste.js",
+    "setup:cookie": "node scripts/setup-cookie.js",
+    "setup:brain": "node scripts/setup-brain.js",
+    "setup:qquin": "node scripts/setup-qquin.js",
+    "qqmusic:start": "cross-env QQ=$npm_config_qq node ../QQMusicApi/bin/www"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {
+    "better-sqlite3": "^12.9.0",
+    "dotenv": "^16.4.5",
+    "express": "^5.2.1",
+    "ws": "^8.20.0"
+  },
+  "devDependencies": {
+    "cross-env": "^10.1.0"
+  }
+}

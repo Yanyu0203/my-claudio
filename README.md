@@ -1,4 +1,4 @@
-# 🎧 Claudio · 你的私人 AI 电台
+# 🎧 Vox · 你的私人 AI 电台
 
 > 一个跑在本地的 AI DJ：读你的音乐口味、感知当下时间天气，自动编排歌单 + 像电台主持人一样跟你说话。
 >
@@ -13,7 +13,7 @@
 > 装了 [CodeBuddy CLI](https://www.codebuddy.ai) 或者 Claude Code？**直接复制下面这段话发给它**：
 
 ```text
-请你阅读 ./CLAUDE.md，按照里面的 SOP 帮我把 Claudio 跑起来。
+请你阅读 ./CLAUDE.md，按照里面的 SOP 帮我把 Vox 跑起来。
 我会在你需要时手动配合（比如登录、复制 cookie、注册账号等）。
 请遇到 ⚠️STOP 标记时停下来等我。
 ```
@@ -55,7 +55,7 @@
 └──────────────────────────────────────────────────────┘
                          ↓
 ┌──────────────────────────────────────────────────────┐
-│  Claudio 中枢 (localhost:8080, Node.js)               │
+│  Vox 中枢 (localhost:8080, Node.js)               │
 │  context.js → bridge.js → resolver.js                 │
 │  (拼 prompt) → (调大脑) → (歌名→mp3 直链)             │
 │                                                       │
@@ -74,7 +74,7 @@
 ```
 你打开浏览器
     ↓
-Claudio 拼 prompt（你的画像 + 当前时间 + 天气 + 最近播过的）
+Vox 拼 prompt（你的画像 + 当前时间 + 天气 + 最近播过的）
     ↓
 CodeBuddy CLI 思考 → 返回 {say, play[5]}
     ↓
@@ -90,28 +90,28 @@ WebSocket 推给浏览器 → 一首接一首播
 ## 项目结构
 
 ```
-my-claudio/                    ← 你 git clone 下来的目录
+my-vox/                    ← 你 git clone 下来的目录
 ├── README.md                  ← 本文件
 ├── SETUP.md                   ← 详细分步安装手册（人友好）
 ├── CLAUDE.md                  ← 给 AI 看的执行 SOP（让 CodeBuddy 帮你跑）
 ├── start.sh                   ← Mac/Linux 一键启动
 ├── start.ps1                  ← Windows 一键启动
-├── claudio/                   ← 主程序代码（这是核心）
+├── vox/                   ← 主程序代码（这是核心）
 │   ├── server.js
 │   ├── src/
 │   ├── pwa/
 │   └── scripts/
-├── QQMusicApi/                ← ⚠️ 不在 repo 里，AI 或你自己 git clone
+├── QQMusicApi/                ← QQ 音乐本地服务（代码已随仓库携带，需要 npm install）
 └── data/                      ← ⚠️ 不在 repo 里，运行时自动生成
-    ├── claudio.db             ← SQLite：播放历史、对话、缓存
+    ├── vox.db             ← SQLite：播放历史、对话、缓存
     ├── taste.md               ← 你的音乐人格画像（大脑读它选歌）
     ├── taste-deltas.md        ← 画像演化追加日志
     └── qq_cookie.json         ← QQ 音乐 cookie（你从浏览器复制来的）
 ```
 
-> 💡 **`QQMusicApi/` 和 `data/` 是空的**，需要你 / AI 安装时补齐：
-> - `QQMusicApi` 来自 https://github.com/jsososo/QQMusicApi.git
-> - `data` 在第一次运行时自动建，你只需要往里塞一份 cookie
+> 💡 **依赖说明**：
+> - `QQMusicApi/` 代码已直接放在本仓库里（基于 [jsososo/QQMusicApi](https://github.com/jsososo/QQMusicApi)，`cd QQMusicApi && npm install` 即可用）
+> - `data/` 在第一次运行时自动建，你只需要往里塞一份 cookie
 
 ---
 
@@ -140,7 +140,7 @@ my-claudio/                    ← 你 git clone 下来的目录
 
 ⚠️ **以下事 AI 帮不了你**，必须人手操作：
 
-1. **选择你想用的"大脑"** —— Claudio 支持三种 CLI 三选一（**三个是独立命令**，挑你已订阅/已装的）：
+1. **选择你想用的"大脑"** —— Vox 支持三种 CLI 三选一（**三个是独立命令**，挑你已订阅/已装的）：
    - **CodeBuddy CLI**（默认，命令 `codebuddy`）
    - **Claude Code 官方**（命令 `claude`）
    - **Claude Internal**（命令 `claude-internal`）
@@ -149,7 +149,7 @@ my-claudio/                    ← 你 git clone 下来的目录
 
 2. **从浏览器复制你的 QQ 音乐 cookie**（登录 y.qq.com 后 F12 找）
 3. **注册和风天气 + 获取 KEY**（手机号注册）
-4. **告诉 Claudio 你想灌哪些歌单作为"口味"**（默认是『这段爱听』+『好歌』，可改）
+4. **告诉 Vox 你想灌哪些歌单作为"口味"**（默认是『这段爱听』+『好歌』，可改）
 
 > 💡 第一次启动时，跑 `npm run setup:brain` 会自动检测你装了哪些 CLI、让你选并写入配置。
 

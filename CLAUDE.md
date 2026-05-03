@@ -1,14 +1,14 @@
-# CLAUDE.md — Claudio 安装 SOP（给 AI 看的执行手册）
+# CLAUDE.md — Vox 安装 SOP（给 AI 看的执行手册）
 
 > **AI 助手注意**：本文档是为你（Claude / CodeBuddy / 类似 AI）准备的**确定性执行手册**。
-> 用户已授权你按此 SOP 帮 TA 完成 Claudio 的安装和首次启动。
+> 用户已授权你按此 SOP 帮 TA 完成 Vox 的安装和首次启动。
 > 严格按下面的"阶段"和"动作"执行；遇到 ⚠️**STOP** 标记必须暂停等用户操作。
 
 ---
 
 ## 项目背景
 
-Claudio 是一个跑在用户本机的 AI 电台。架构：
+Vox 是一个跑在用户本机的 AI 电台。架构：
 - **大脑**：CodeBuddy CLI 调用，输出 JSON `{say, play[]}`
 - **曲库**：本地 QQMusicApi 服务（`http://127.0.0.1:3300`）
 - **天气**：和风（可选）
@@ -36,7 +36,7 @@ $env:OS    # → Windows_NT
 
 ## 项目根目录约定
 
-假设用户工作目录为 `<ROOT>`，**就是 my-claudio 这个 git 仓库的根目录**（默认 `~/Desktop/my-claudio` 或 `C:\Users\xxx\Desktop\my-claudio`）。
+假设用户工作目录为 `<ROOT>`，**就是 my-vox 这个 git 仓库的根目录**（默认 `~/Desktop/my-vox` 或 `C:\Users\xxx\Desktop\my-vox`）。
 
 执行任何命令前，先 `cd <ROOT>` 并确认目录里**应该**有这些：
 
@@ -44,11 +44,11 @@ $env:OS    # → Windows_NT
 |---|---|---|
 | `README.md` `SETUP.md` `CLAUDE.md` | ✅ | 文档 |
 | `start.sh` `start.ps1` | ✅ | 一键启动脚本 |
-| `claudio/` | ✅ | 主程序代码 |
-| `QQMusicApi/` | ❌ **要 git clone** | 第三方曲库服务，地址 `https://github.com/jsososo/QQMusicApi.git` |
+| `vox/` | ✅ | 主程序代码 |
+| `QQMusicApi/` | ✅ (代码自带) | 第三方曲库服务，仓库内即有代码（源自 https://github.com/jsososo/QQMusicApi.git）；用户只需 `npm install` |
 | `data/` | ❌ **运行时建** | 用户的私人数据；至少要往里塞一份 `qq_cookie.json` |
 
-**用户拿到的 repo 里只有前 4 项**。`QQMusicApi/` 和 `data/` 需要在安装过程中补齐（阶段 4 和阶段 6 处理）。
+**用户拿到的 repo 里含前 5 项**。`data/` 需要在安装过程中补齐（阶段 6 处理）。
 
 ---
 
@@ -59,11 +59,11 @@ $env:OS    # → Windows_NT
 | 1. 检测环境 | ❌ AI 自动 | 30s |
 | 2. 装 Node / Git（如缺）| ❌ AI 自动 | 2-5min |
 | 3. **选大脑（codebuddy / claude）+ 验证登录** | ⚠️ 必须人扫码登录 | 1-3min |
-| 4. 装 QQMusicApi | ❌ AI 自动 | 2min |
+| 4. 装 QQMusicApi 依赖 | ❌ AI 自动 | 2min |
 | 5. 启动 QQMusicApi | ❌ AI 自动 | 30s |
 | 6. **复制 QQ 音乐 cookie** | ⚠️**STOP** 必须人 | 5min |
 | 7. 喂 cookie 并验证 | ❌ AI 自动 | 1min |
-| 8. 装 Claudio + 复制 .env + setup:brain | ❌ AI 自动 | 1min |
+| 8. 装 Vox + 复制 .env + setup:brain | ❌ AI 自动 | 1min |
 | 9. **填 .env (QQ_UIN, 可选天气)** | ⚠️**STOP** 必须人 | 1min（不接天气）/ 10min（接天气） |
 | 10. 灌口味（生成 taste.md）| ❌ AI 自动（要 1-3min）| 3min |
 | 11. 启动 + 验证 | ❌ AI 自动 | 1min |
@@ -129,7 +129,7 @@ git --version
 
 ## 阶段 3：选大脑 + 验证登录
 
-Claudio 支持 3 种大脑 CLI（用户三选一），**三个是独立的可执行文件**：
+Vox 支持 3 种大脑 CLI（用户三选一），**三个是独立的可执行文件**：
 
 | 选项 ID | 命令 | 适用 |
 |---|---|---|
@@ -159,7 +159,7 @@ claude-internal: ✗ 未检测到
 
 > ⚠️**STOP**：根据 3.1 的检测结果问用户：
 >
-> "Claudio 的大脑用哪个 CLI？检测到你装了：[列出已装的]
+> "Vox 的大脑用哪个 CLI？检测到你装了：[列出已装的]
 >
 > 选项：
 >   (1) codebuddy        ← CodeBuddy 订阅
@@ -207,57 +207,35 @@ claude-internal: ✗ 未检测到
 
 ---
 
-## 阶段 4：装 QQMusicApi
+## 阶段 4：装 QQMusicApi 依赖
 
-### 动作 4.1 — Clone 到 `<ROOT>/QQMusicApi/`
+> 💡 `QQMusicApi/` 代码已经**随 my-vox 仓库一起下发**，`yarn.lock` 里的源也**已经替换为国内镜像**（`registry.npmmirror.com`）。AI 不用再 clone、不用再 sed 改源，直接进目录装依赖即可。
 
-⚠️ **`QQMusicApi/` 不在 my-claudio repo 里**，必须 clone：
-
-```bash
-cd <ROOT>
-[ -d QQMusicApi ] || git clone https://github.com/jsososo/QQMusicApi.git
-cd QQMusicApi
-```
-
-#### Windows PowerShell
-
-```powershell
-cd <ROOT>
-if (!(Test-Path QQMusicApi)) { git clone https://github.com/jsososo/QQMusicApi.git }
-cd QQMusicApi
-```
-
-### 动作 4.2 — 修复 lock 文件中过期的源
-
-⚠️ **必做**，否则 `npm install` 必报 `certificate has expired` 或 `ENOTFOUND`。
+### 动作 4.1 — 进入目录并装依赖
 
 #### macOS / Linux
 
 ```bash
-sed -i '' \
-  -e 's|registry.npm.taobao.org|registry.npmmirror.com|g' \
-  -e 's|registry.nlark.com|registry.npmmirror.com|g' \
-  -e 's|registry.yarnpkg.com|registry.npmmirror.com|g' \
-  yarn.lock
+cd <ROOT>/QQMusicApi
+[ -d node_modules ] || npm install
 ```
 
 #### Windows PowerShell
 
 ```powershell
-(Get-Content yarn.lock) `
-  -replace 'registry\.npm\.taobao\.org', 'registry.npmmirror.com' `
-  -replace 'registry\.nlark\.com', 'registry.npmmirror.com' `
-  -replace 'registry\.yarnpkg\.com', 'registry.npmmirror.com' |
-  Set-Content yarn.lock
-```
-
-### 动作 4.3 — 装依赖
-
-```bash
-npm install
+cd <ROOT>\QQMusicApi
+if (!(Test-Path node_modules)) { npm install }
 ```
 
 期望：30-90 秒内完成，最后输出 `added xxx packages`。
+
+### 兜底：极少数情况下 `npm install` 仍报镜像不通
+
+直接指定镜像再跑一次：
+
+```bash
+npm install --registry=https://registry.npmmirror.com
+```
 
 ### 验证
 
@@ -352,10 +330,10 @@ mkdir -p <ROOT>/data
 
 ## 阶段 7：喂 cookie 并验证
 
-### 动作 7.1 — 装 Claudio 依赖（先装才能用 setup:cookie 脚本）
+### 动作 7.1 — 装 Vox 依赖（先装才能用 setup:cookie 脚本）
 
 ```bash
-cd <ROOT>/claudio
+cd <ROOT>/vox
 npm install
 ```
 
@@ -389,21 +367,21 @@ npm run verify:qq
 
 ---
 
-## 阶段 8：装 Claudio + 复制 .env + 写大脑配置
+## 阶段 8：装 Vox + 复制 .env + 写大脑配置
 
 ### 动作 8.1 — 复制 .env 模板
 
 #### macOS / Linux
 
 ```bash
-cd <ROOT>/claudio
+cd <ROOT>/vox
 [ -f .env ] || cp .env.example .env
 ```
 
 #### Windows
 
 ```powershell
-cd <ROOT>\claudio
+cd <ROOT>\vox
 if (!(Test-Path .env)) { Copy-Item .env.example .env }
 ```
 
@@ -417,16 +395,16 @@ if (!(Test-Path .env)) { Copy-Item .env.example .env }
 sed -i '' \
   -e "s/^BRAIN_BIN=.*/BRAIN_BIN=<BRAIN_BIN>/" \
   -e "s/^BRAIN_FLAVOR=.*/BRAIN_FLAVOR=<BRAIN_FLAVOR>/" \
-  <ROOT>/claudio/.env
+  <ROOT>/vox/.env
 ```
 
 #### Windows
 
 ```powershell
-(Get-Content "<ROOT>\claudio\.env") `
+(Get-Content "<ROOT>\vox\.env") `
   -replace '^BRAIN_BIN=.*', "BRAIN_BIN=<BRAIN_BIN>" `
   -replace '^BRAIN_FLAVOR=.*', "BRAIN_FLAVOR=<BRAIN_FLAVOR>" |
-  Set-Content "<ROOT>\claudio\.env"
+  Set-Content "<ROOT>\vox\.env"
 ```
 
 > 💡 也可以让用户跑 `npm run setup:brain` 交互式选，效果一样。
@@ -437,22 +415,22 @@ sed -i '' \
 
 ### 必填
 
-打开 `<ROOT>/claudio/.env`，把 `QQ_UIN=1234567890` 改成用户 QQ 号。
+打开 `<ROOT>/vox/.env`，把 `QQ_UIN=1234567890` 改成用户 QQ 号。
 
 AI 可以直接用 sed 改：
 
 #### macOS / Linux
 
 ```bash
-sed -i '' "s/^QQ_UIN=.*/QQ_UIN=<QQ_UIN>/" <ROOT>/claudio/.env
+sed -i '' "s/^QQ_UIN=.*/QQ_UIN=<QQ_UIN>/" <ROOT>/vox/.env
 ```
 
 #### Windows
 
 ```powershell
-(Get-Content "<ROOT>\claudio\.env") `
+(Get-Content "<ROOT>\vox\.env") `
   -replace '^QQ_UIN=.*', "QQ_UIN=<QQ_UIN>" |
-  Set-Content "<ROOT>\claudio\.env"
+  Set-Content "<ROOT>\vox\.env"
 ```
 
 ### 选填：天气
@@ -482,7 +460,7 @@ sed -i '' "s/^QQ_UIN=.*/QQ_UIN=<QQ_UIN>/" <ROOT>/claudio/.env
 ### 动作 10.1 — 列出用户的歌单（先看能不能拿到目标歌单）
 
 ```bash
-cd <ROOT>/claudio
+cd <ROOT>/vox
 npm run verify:qq 2>&1 | grep -A 20 "拉我的歌单"
 ```
 
@@ -493,7 +471,7 @@ npm run verify:qq 2>&1 | grep -A 20 "拉我的歌单"
 > 问用户："你的 QQ 音乐里没有 '这段爱听' 或 '好歌' 这两个歌单。
 > 要不你告诉我**两个你最常听的歌单名**？我会改 bootstrap 脚本去抓那两个。"
 
-得到名字后，编辑 `<ROOT>/claudio/scripts/bootstrap-taste.js`，把这一行改成用户给的：
+得到名字后，编辑 `<ROOT>/vox/scripts/bootstrap-taste.js`，把这一行改成用户给的：
 
 ```js
 const TARGET_PLAYLIST_NAMES = ['歌单名1', '歌单名2'];
@@ -502,7 +480,7 @@ const TARGET_PLAYLIST_NAMES = ['歌单名1', '歌单名2'];
 ### 动作 10.2 — 跑 bootstrap
 
 ```bash
-cd <ROOT>/claudio
+cd <ROOT>/vox
 npm run bootstrap:taste
 ```
 
@@ -570,8 +548,8 @@ curl -s http://localhost:8080/api/health
 
 或更简单：**让用户打开浏览器**：
 
-> 告诉用户："Claudio 跑起来了！请打开 http://localhost:8080 ，等 10-30 秒大脑思考完，应该开始播第一首歌。
-> 如果一直卡在 'AI THINKING'，告诉我，我看 `logs/claudio.log`。"
+> 告诉用户："Vox 跑起来了！请打开 http://localhost:8080 ，等 10-30 秒大脑思考完，应该开始播第一首歌。
+> 如果一直卡在 'AI THINKING'，告诉我，我看 `logs/vox.log`。"
 
 ---
 
@@ -586,7 +564,7 @@ curl -s http://localhost:8080/api/health
 | 拿不到歌单 | 7.3 | QQMusicApi 启动时没带 `QQ=` 参数；杀掉重启 |
 | 直链都为空 | 7.3 | 用户没 VIP（可接受）；或 cookie 没生效（重做 7.2） |
 | `bootstrap:taste` 报"找不到目标歌单" | 10 | 改 `TARGET_PLAYLIST_NAMES` |
-| 浏览器一直 'AI THINKING' | 11 | 看 logs/claudio.log；常见 codebuddy 调用超时 |
+| 浏览器一直 'AI THINKING' | 11 | 看 logs/vox.log；常见 codebuddy 调用超时 |
 | Windows: 脚本不能执行 | 11 | `Set-ExecutionPolicy -Scope CurrentUser -ExecutionPolicy RemoteSigned` |
 
 ---
@@ -597,7 +575,7 @@ curl -s http://localhost:8080/api/health
 2. **每个 ⚠️STOP 步骤**必须显式暂停，不要自己编 cookie / KEY 等用户私密信息
 3. **不要修改** `data/` 下任何文件除了 `qq_cookie.json`（用户允许时）
 4. **遇到错误**优先查上面"错误处理"表，再看 SETUP.md「常见错误对照表」
-5. **不要静默修改** `claudio/` 源代码（除非用户明确要求 + 你说清楚改了啥）
+5. **不要静默修改** `vox/` 源代码（除非用户明确要求 + 你说清楚改了啥）
 6. **不要 `git commit`** 任何东西，除非用户要求
 7. 整个流程跑通后，**给用户一个简短总结**：哪些跑通了、哪些是用户后续可调的（比如改 taste 目标歌单、加天气、调 .env 中参数）
 
@@ -608,22 +586,22 @@ curl -s http://localhost:8080/api/health
 跑完阶段 11 后，给用户输出类似总结：
 
 ```
-✅ Claudio 安装完成
+✅ Vox 安装完成
 
 数据目录: <ROOT>/data
-- claudio.db       （SQLite，记你播放/对话/缓存）
+- vox.db       （SQLite，记你播放/对话/缓存）
 - taste.md         （你的音乐画像，可手改）
 - qq_cookie.json   （登录态，别外传）
 
 服务:
 - QQMusicApi       http://127.0.0.1:3300
-- Claudio          http://localhost:8080  ← 打开这个
+- Vox          http://localhost:8080  ← 打开这个
 
 下次启动只需:
   cd <ROOT>
   ./start.sh        (Mac)
   .\start.ps1       (Windows)
 
-要换灌口味用的歌单 → 改 claudio/scripts/bootstrap-taste.js
-要加/改天气 → 改 claudio/.env
+要换灌口味用的歌单 → 改 vox/scripts/bootstrap-taste.js
+要加/改天气 → 改 vox/.env
 ```

@@ -1,0 +1,35 @@
+# 日志
+logs/
+*.log
+
+# 数据目录里的运行时产物（保留 taste.md / qq_cookie.example.json 等模板）
+data/*.db
+data/*.db-shm
+data/*.db-wal
+data/*.tmp
+data/qq_cookie.json
+data/.last-block-prompt.txt
+
+# QQMusicApi 第三方依赖：代码进仓库，但忽略它的运行时产物
+# （node_modules 通过全局规则排除；data 含 cookie 必须排除；log/bak 脏数据清掉）
+QQMusicApi/node_modules/
+QQMusicApi/data/
+QQMusicApi/*.log
+QQMusicApi/*.bak
+QQMusicApi/.idea/
+
+# 系统
+.DS_Store
+Thumbs.db
+
+# 编辑器
+.idea/
+.vscode/
+*.swp
+
+# Node
+node_modules/
+
+# 环境变量
+.env
+.env.local
