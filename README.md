@@ -102,8 +102,9 @@ my-vox/                    ← 你 git clone 下来的目录
 │   ├── pwa/
 │   └── scripts/
 ├── QQMusicApi/                ← QQ 音乐本地服务（代码已随仓库携带，需要 npm install）
-└── data/                      ← ⚠️ 不在 repo 里，运行时自动生成
-    ├── vox.db             ← SQLite：播放历史、对话、缓存
+├── data.example/              ← 📖 data/ 目录的样例模板（给新用户参考格式用）
+└── data/                      ← ⚠️ 不在 repo 里，运行时自动生成，含你的 cookie 和听歌历史
+    ├── vox.db                 ← SQLite：播放历史、对话、缓存
     ├── taste.md               ← 你的音乐人格画像（大脑读它选歌）
     ├── taste-deltas.md        ← 画像演化追加日志
     └── qq_cookie.json         ← QQ 音乐 cookie（你从浏览器复制来的）
@@ -112,6 +113,7 @@ my-vox/                    ← 你 git clone 下来的目录
 > 💡 **依赖说明**：
 > - `QQMusicApi/` 代码已直接放在本仓库里（基于 [jsososo/QQMusicApi](https://github.com/jsososo/QQMusicApi)，`cd QQMusicApi && npm install` 即可用）
 > - `data/` 在第一次运行时自动建，你只需要往里塞一份 cookie
+> - `data.example/` 是参考模板（能看到 cookie / taste.md 的格式），运行时不会被读取
 
 ---
 
