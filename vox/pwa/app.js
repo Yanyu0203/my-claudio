@@ -10,6 +10,10 @@ let djSayTimer = null;
 let currentTheme = 'cyber';
 let userPaused = false;  // 用户主动暂停过（用于 resume 检测）
 let programmaticPause = false; // 程序主动暂停（replace / 切歌），不当作用户暂停
+// audio 错误重试：网络抖动先重试，不直接跳歌
+let errorRetryCount = 0;
+let errorRetryTimer = null;
+const ERROR_RETRY_LIMIT = 1;
 
 // 主题模式: 'auto' = 跟天气, 其他 = 手动锁定
 const THEME_PREF_KEY = 'vox.themePref';
@@ -44,6 +48,30 @@ const loadingSub = $('loadingSub');
 const loadingFill = $('loadingFill');
 const loadingElapsed = $('loadingElapsed');
 const loadingEta = $('loadingEta');
+
+// 播放历史 Modal
+const historyBtn = $('historyBtn');
+const historyModal = $('historyModal');
+const historyClose = $('historyClose');
+const historyList = $('historyList');
+
+// 画像冷启动 Modal
+const resetTasteBtn = $('resetTasteBtn');
+const bootstrapModal = $('bootstrapModal');
+const bootstrapClose = $('bootstrapClose');
+const bootstrapTitle = $('bootstrapTitle');
+const bootstrapStepPick = $('bootstrapStepPick');
+const bootstrapStepProgress = $('bootstrapStepProgress');
+const bootstrapStepDone = $('bootstrapStepDone');
+const bootstrapPlaylists = $('bootstrapPlaylists');
+const bootstrapPickStats = $('bootstrapPickStats');
+const bootstrapGoBtn = $('bootstrapGoBtn');
+const bootstrapStage = $('bootstrapStage');
+const bootstrapBarFill = $('bootstrapBarFill');
+const bootstrapDetail = $('bootstrapDetail');
+const bootstrapLog = $('bootstrapLog');
+const bootstrapDoneBtn = $('bootstrapDoneBtn');
+const bootstrapDoneDetail = $('bootstrapDoneDetail');
 
 // ============================================================
 // Loading 状态机
@@ -212,6 +240,31 @@ function handleServer({ type, data }) {
     case 'reply_end':
       finishStreamingBubble(data.id, data.final, !!data.error);
       break;
+    case 'chat_cleared':
+      chatLog.innerHTML = '';
+      pushSysLog(`已清空 ${data.count} 条对话`);
+      break;
+    case 'rate_result':
+      // 评分失败就回退 UI（乐观更新过，失败要还原）
+      if (!data.ok) {
+        console.warn('[rate] server rejected, reloading');
+        // 简单做法：重拉历史（列表还是打开着的话会自动刷新）
+        if (historyModal.classList.contains('show')) openHistory();
+      }
+      break;
+    case 'current_rating':
+      // server 回推当前歌评分（用于多标签同步；如果 title+artist 跟前端一致就更新 UI）
+      if (current && current.title === data.title && current.artist === data.artist) {
+        currentRating = data.rating || null;
+        refreshRateButtons();
+      }
+      break;
+    case 'bootstrap_progress':
+      handleBootstrapProgress(data);
+      break;
+    case 'bootstrap_done':
+      handleBootstrapDone(data);
+      break;
     case 'control':
       // 服务端要求执行某个动作（目前只有 skip）
       if (data.action === 'skip') {
@@ -223,6 +276,18 @@ function handleServer({ type, data }) {
       setStatus('ERR // ' + data.message);
       hideLoading();
       console.error(data);
+      break;
+    case 'qq_auth_required':
+      showQQAuthModal(data?.reason || '');
+      hideLoading();
+      setStatus('QQ COOKIE 失效 // 等待更新');
+      break;
+    case 'qq_auth_ok':
+      hideQQAuthModal();
+      setStatus('COOKIE 已更新 // 恢复推荐');
+      break;
+    case 'qq_cookie_update_result':
+      handleQQCookieUpdateResult(data);
       break;
   }
 }
@@ -267,6 +332,8 @@ function handleHello(data) {
     // 直接进入"播第一首"，但保留 server 报的进度
     const restorePos = Math.max(0, data.currentPos || 0);
     current = queue.shift();
+    currentRating = null;
+    refreshRateButtons?.();
     renderCurrentSong();
     audio.src = current.url;
 
@@ -347,13 +414,22 @@ function consumeBlock(data) {
   pushDjLog(data.say);
   queue = data.songs.slice();
   window.__currentBlockSongs = data.songs.length; // 记下总数，给 song_advance 反推下标用
+  prefetching = false; // 新段到了，下个预拉窗口重新算
   renderQueue();
-  if (data.failed?.length) console.warn('找不到的歌:', data.failed);
+  if (data.failed?.length) {
+    console.warn('找不到的歌:', data.failed);
+    // 用户应该知道：本段只有 N/M 首能播
+    const got = data.songs.length;
+    const asked = got + data.failed.length;
+    if (got < asked) {
+      pushSysLog(`本段 ${asked} 首里有 ${data.failed.length} 首 QQ 音乐找不到，实际播 ${got} 首`);
+    }
+  }
   playNext();
 }
 
 function playNext() {
-  console.log(`[playNext] queue=${queue.length}, nextBlock=${nextBlock ? 'have' : 'no'}`);
+  console.log(`[playNext] queue=${queue.length}, nextBlock=${nextBlock ? 'have' : 'no'}, prefetching=${prefetching}`);
   if (!queue.length) {
     // 优先用预拉的下一段
     if (nextBlock && nextBlock !== '__server_has__') {
@@ -369,12 +445,24 @@ function playNext() {
       console.log('[prefetch] server 上的 prefetch 还没推过来，请求');
       nextBlock = null;
     }
-    // 没预拉 → 现去要
+
+    // 没有预拉 → 要一段
+    // 如果已经在 prefetching（maybePrefetch 更早发过 request_block），不重复发
+    // 只是显示"准备中"，等 server 的 block 到了会自动进 consumeBlock
+    if (!prefetching) {
+      prefetching = true;
+      send('request_block');
+    }
+    console.log('[playNext] 队列空，等 server 回 block（已在请求中）');
     showLoading('thinking');
-    send('request_block');
     return;
   }
   current = queue.shift();
+  currentRating = null;
+  refreshRateButtons?.();
+  // 清掉上一首遗留的重试状态
+  errorRetryCount = 0;
+  if (errorRetryTimer) { clearTimeout(errorRetryTimer); errorRetryTimer = null; }
   console.log(`[play] 开始 [${current.title} - ${current.artist}]`);
   audio.src = current.url;
   audio.play()
@@ -435,9 +523,53 @@ audio.addEventListener('timeupdate', () => {
   // 节流：每 ~3s 上报一次播放位置
   reportPosThrottled(cur);
 });
+// audio error 处理：网络抖动 / 临时失败很常见，不要无条件跳歌
+// 策略：同一首歌先重试一次（重载 src）；仍失败才切
 audio.addEventListener('error', () => {
-  console.warn('audio error, skip', current);
-  playNext();
+  const err = audio.error;
+  console.warn(`[audio error] code=${err?.code}, current=${current?.title}, retried=${errorRetryCount}`);
+
+  if (!current) return;
+
+  // 已经重试够了 → 放弃，切下一首
+  if (errorRetryCount >= ERROR_RETRY_LIMIT) {
+    console.warn(`[audio error] 重试 ${errorRetryCount} 次仍失败，切下一首`);
+    errorRetryCount = 0;
+    pushSysLog(`这首播放失败: ${current.title} - ${current.artist}，跳过`);
+    playNext();
+    return;
+  }
+
+  // 重试一次
+  errorRetryCount++;
+  console.log(`[audio error] ${1500 * errorRetryCount}ms 后重试 [${errorRetryCount}/${ERROR_RETRY_LIMIT}]`);
+  setStatus('NETWORK HICCUP // RETRY...', true);
+  if (errorRetryTimer) clearTimeout(errorRetryTimer);
+  errorRetryTimer = setTimeout(() => {
+    if (!current) return;
+    // 重新设 src 触发重新加载
+    const savedPos = audio.currentTime;
+    audio.src = current.url;
+    audio.play()
+      .then(() => {
+        // 尽量恢复到原位置
+        if (savedPos > 0) {
+          try { audio.currentTime = savedPos; } catch {}
+        }
+        setStatus('SYS // ONLINE', true);
+      })
+      .catch((e) => {
+        console.warn('[audio error] 重试 play 也失败', e);
+      });
+  }, 1500 * errorRetryCount);
+});
+
+// 成功播放一段时间后，重置重试计数（说明网络又好了）
+audio.addEventListener('playing', () => {
+  if (errorRetryCount > 0) {
+    console.log('[audio] 恢复播放，重置重试计数');
+    errorRetryCount = 0;
+  }
 });
 
 let lastPosReportAt = 0;
@@ -523,6 +655,339 @@ chatForm.addEventListener('submit', (e) => {
   chatInput.value = '';
 });
 
+// 清空对话历史
+const btnClearChat = $('btnClearChat');
+if (btnClearChat) {
+  btnClearChat.addEventListener('click', () => {
+    if (!confirm('清空与 Vox 的全部对话历史？\n（只清对话，不影响你的口味画像和播放历史）')) return;
+    send('clear_chat');
+  });
+}
+
+// ============================================================
+// 当前播放歌的"喜欢 / 不感兴趣"按钮
+// ============================================================
+const btnLike = $('btnLike');
+const btnDislike = $('btnDislike');
+let currentRating = null; // 'like' | 'dislike' | null，只对"current 这首"有效
+
+function rateCurrent(wantRating) {
+  if (!current) {
+    setStatus('还没开始播，等第一首歌出来');
+    return;
+  }
+  // 再点一次相同 = 取消
+  const newRating = currentRating === wantRating ? null : wantRating;
+  currentRating = newRating;
+  refreshRateButtons();
+  // 点击反馈：flash 一下
+  const btn = wantRating === 'like' ? btnLike : btnDislike;
+  btn.classList.remove('just-clicked');
+  void btn.offsetWidth; // 强制 reflow 重启动画
+  btn.classList.add('just-clicked');
+
+  send('rate_current', {
+    title: current.title,
+    artist: current.artist,
+    rating: newRating,
+  });
+}
+
+function refreshRateButtons() {
+  btnLike.classList.toggle('active', currentRating === 'like');
+  btnDislike.classList.toggle('active', currentRating === 'dislike');
+}
+
+if (btnLike) btnLike.addEventListener('click', () => rateCurrent('like'));
+if (btnDislike) btnDislike.addEventListener('click', () => rateCurrent('dislike'));
+
+// ============================================================
+// 播放历史 Modal
+// ============================================================
+let historyCache = []; // 最近一次拉到的历史，按 id → item 索引用
+
+historyBtn.addEventListener('click', openHistory);
+historyClose.addEventListener('click', closeHistory);
+historyModal.querySelector('.history-backdrop').addEventListener('click', closeHistory);
+document.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape' && historyModal.classList.contains('show')) closeHistory();
+});
+
+async function openHistory() {
+  historyModal.classList.add('show');
+  historyList.innerHTML = '<div class="history-empty">加载中...</div>';
+  try {
+    const res = await fetch('/api/history?n=80');
+    const { history } = await res.json();
+    historyCache = history || [];
+    renderHistory();
+  } catch (e) {
+    historyList.innerHTML = '<div class="history-empty">拉取历史失败</div>';
+    console.error(e);
+  }
+}
+
+function closeHistory() {
+  historyModal.classList.remove('show');
+}
+
+function renderHistory() {
+  if (!historyCache.length) {
+    historyList.innerHTML = '<div class="history-empty">还没播过歌</div>';
+    return;
+  }
+  historyList.innerHTML = historyCache.map((h, i) => {
+    const likeOn = h.rating === 'like' ? 'active like' : '';
+    const disOn = h.rating === 'dislike' ? 'active dislike' : '';
+    const skipTag = !h.played ? '<span class="skip-badge">SKIPPED</span>' : '';
+    return `
+      <div class="history-item" data-id="${h.id}">
+        <div class="idx">${String(i + 1).padStart(2, '0')}</div>
+        <div class="info">
+          <div class="t">${esc(h.title)}${skipTag}</div>
+          <div class="a">${esc(h.artist)}</div>
+        </div>
+        <div class="time">${fmtRelTime(h.ts)}</div>
+        <div class="rate">
+          <button class="btn-rate ${likeOn}" data-rating="like" title="喜欢">♥</button>
+          <button class="btn-rate ${disOn}" data-rating="dislike" title="不感兴趣">✕</button>
+        </div>
+      </div>
+    `;
+  }).join('');
+
+  // 事件委托
+  historyList.querySelectorAll('.btn-rate').forEach((btn) => {
+    btn.addEventListener('click', onRateClick);
+  });
+}
+
+function onRateClick(e) {
+  const btn = e.currentTarget;
+  const row = btn.closest('.history-item');
+  const id = Number(row.dataset.id);
+  const wantRating = btn.dataset.rating; // 'like' / 'dislike'
+  const item = historyCache.find((h) => h.id === id);
+  if (!item) return;
+  // 再点一次相同的评分 = 取消
+  const newRating = item.rating === wantRating ? null : wantRating;
+  // 乐观更新 UI
+  item.rating = newRating;
+  renderHistory();
+  send('rate_song', { id, rating: newRating });
+}
+
+function fmtRelTime(iso) {
+  if (!iso) return '';
+  const t = new Date(iso).getTime();
+  const now = Date.now();
+  const dt = (now - t) / 1000;
+  if (dt < 60) return '刚刚';
+  if (dt < 3600) return Math.floor(dt / 60) + ' 分钟前';
+  if (dt < 86400) return Math.floor(dt / 3600) + ' 小时前';
+  if (dt < 86400 * 7) return Math.floor(dt / 86400) + ' 天前';
+  const d = new Date(iso);
+  return `${d.getMonth() + 1}-${d.getDate()}`;
+}
+
+// ============================================================
+// 画像冷启动 Modal（首次配置 / 重置画像）
+// ============================================================
+let playlistCache = []; // 拉到的歌单列表
+let playlistPicks = {}; // { [tid]: {kind, n} }  用户的选择
+
+resetTasteBtn.addEventListener('click', () => openBootstrapModal(true));
+bootstrapClose.addEventListener('click', closeBootstrapModal);
+bootstrapModal.querySelector('.history-backdrop').addEventListener('click', closeBootstrapModal);
+bootstrapGoBtn.addEventListener('click', onBootstrapSubmit);
+bootstrapDoneBtn.addEventListener('click', () => location.reload());
+
+async function openBootstrapModal(isReset) {
+  bootstrapTitle.textContent = isReset ? 'RESET TASTE' : 'INITIALIZE TASTE';
+  bootstrapStepPick.style.display = '';
+  bootstrapStepProgress.style.display = 'none';
+  bootstrapStepDone.style.display = 'none';
+  bootstrapModal.classList.add('show');
+  bootstrapPlaylists.innerHTML = '<div class="history-empty">正在拉取你的歌单...</div>';
+  playlistPicks = {};
+  try {
+    const res = await fetch('/api/playlists');
+    if (!res.ok) throw new Error('HTTP ' + res.status);
+    const { playlists } = await res.json();
+    playlistCache = playlists || [];
+    if (!playlistCache.length) {
+      bootstrapPlaylists.innerHTML = '<div class="history-empty">没有拉到歌单。检查 QQMusicApi 是否在跑、cookie 是否有效。</div>';
+      return;
+    }
+    renderPlaylistPicker();
+  } catch (e) {
+    bootstrapPlaylists.innerHTML = `<div class="history-empty">拉取失败：${esc(e.message)}</div>`;
+  }
+}
+
+function closeBootstrapModal() {
+  // 生成中不允许关闭，避免误操作
+  if (bootstrapStepProgress.style.display !== 'none' &&
+      bootstrapStepDone.style.display === 'none') {
+    if (!confirm('画像正在生成中，关闭只是隐藏弹窗，后台仍会继续。确认吗？')) return;
+  }
+  bootstrapModal.classList.remove('show');
+}
+
+function renderPlaylistPicker() {
+  bootstrapPlaylists.innerHTML = playlistCache.map((p) => {
+    // 默认猜一个合理的策略：<=200 首 → all，否则 → random 100
+    const suggested = p.songCount <= 200 ? { kind: 'all' } : { kind: 'random', n: 100 };
+    return `
+      <div class="bs-item" data-tid="${p.tid}">
+        <div class="chk" data-action="toggle"></div>
+        <div class="pl-info">
+          <div class="pl-name">${esc(p.name)}</div>
+          <div class="pl-meta">${p.songCount} 首</div>
+        </div>
+        <div class="pl-strategy">
+          <select data-action="kind">
+            <option value="all" ${suggested.kind === 'all' ? 'selected' : ''}>全量</option>
+            <option value="random" ${suggested.kind === 'random' ? 'selected' : ''}>随机 N</option>
+            <option value="front">前 N</option>
+          </select>
+          <input type="number" data-action="n" min="1" max="500" value="${suggested.n || 100}" ${suggested.kind === 'all' ? 'disabled' : ''}>
+        </div>
+      </div>
+    `;
+  }).join('');
+
+  // 事件委托
+  bootstrapPlaylists.querySelectorAll('.bs-item').forEach((row) => {
+    const tid = Number(row.dataset.tid);
+    const chk = row.querySelector('.chk');
+    const kindSel = row.querySelector('select');
+    const nInput = row.querySelector('input');
+
+    chk.addEventListener('click', () => {
+      if (playlistPicks[tid]) {
+        delete playlistPicks[tid];
+      } else {
+        playlistPicks[tid] = { kind: kindSel.value, n: Number(nInput.value) || 100 };
+      }
+      row.classList.toggle('picked', !!playlistPicks[tid]);
+      chk.classList.toggle('on', !!playlistPicks[tid]);
+      refreshPickStats();
+    });
+
+    kindSel.addEventListener('change', () => {
+      const kind = kindSel.value;
+      nInput.disabled = kind === 'all';
+      if (playlistPicks[tid]) {
+        playlistPicks[tid].kind = kind;
+        playlistPicks[tid].n = Number(nInput.value) || 100;
+        refreshPickStats();
+      }
+    });
+    nInput.addEventListener('input', () => {
+      if (playlistPicks[tid]) {
+        playlistPicks[tid].n = Number(nInput.value) || 100;
+        refreshPickStats();
+      }
+    });
+  });
+
+  refreshPickStats();
+}
+
+function refreshPickStats() {
+  const picked = Object.entries(playlistPicks);
+  if (!picked.length) {
+    bootstrapPickStats.textContent = '未选';
+    bootstrapGoBtn.disabled = true;
+    return;
+  }
+  // 估算抽出的歌数
+  let est = 0;
+  picked.forEach(([tid, cfg]) => {
+    const p = playlistCache.find((x) => String(x.tid) === String(tid));
+    if (!p) return;
+    if (cfg.kind === 'all') est += p.songCount;
+    else est += Math.min(p.songCount, cfg.n || 100);
+  });
+  bootstrapPickStats.textContent = `已选 ${picked.length} 个歌单，预计 ~${est} 首样本`;
+  bootstrapGoBtn.disabled = false;
+
+  if (est > 600) {
+    bootstrapPickStats.textContent += '（样本太多大脑会慢，建议 ≤ 400）';
+  }
+}
+
+function onBootstrapSubmit() {
+  const picks = Object.entries(playlistPicks).map(([tid, cfg]) => {
+    const p = playlistCache.find((x) => String(x.tid) === String(tid));
+    return {
+      tid: p.tid,
+      name: p.name,
+      kind: cfg.kind,
+      n: cfg.kind === 'all' ? undefined : (cfg.n || 100),
+    };
+  });
+  if (!picks.length) return;
+  bootstrapStepPick.style.display = 'none';
+  bootstrapStepProgress.style.display = '';
+  bootstrapStage.textContent = 'STARTING';
+  bootstrapDetail.textContent = '正在启动...';
+  bootstrapBarFill.style.width = '1%';
+  bootstrapLog.innerHTML = '';
+  send('bootstrap_start', { picks });
+}
+
+function handleBootstrapProgress(evt) {
+  // evt: { stage, detail, pct }
+  if (evt.stage === 'error') {
+    bootstrapStage.textContent = 'ERROR';
+    bootstrapDetail.textContent = evt.detail || '出错了';
+    bootstrapDetail.style.color = 'var(--warn, #ffb800)';
+    appendBootstrapLog(evt.detail || '出错了', true);
+    return;
+  }
+  bootstrapStage.textContent = String(evt.stage || '').toUpperCase();
+  if (evt.detail) {
+    bootstrapDetail.textContent = evt.detail;
+    bootstrapDetail.style.color = 'var(--neon-pri)';
+    appendBootstrapLog(evt.detail, false);
+  }
+  if (typeof evt.pct === 'number') {
+    bootstrapBarFill.style.width = Math.min(100, Math.max(0, evt.pct)) + '%';
+  }
+}
+
+function appendBootstrapLog(text, isErr) {
+  const row = document.createElement('div');
+  row.className = 'log-row' + (isErr ? ' err' : '');
+  row.textContent = `[${new Date().toLocaleTimeString()}] ${text}`;
+  bootstrapLog.appendChild(row);
+  bootstrapLog.scrollTop = bootstrapLog.scrollHeight;
+}
+
+function handleBootstrapDone(info) {
+  bootstrapStepProgress.style.display = 'none';
+  bootstrapStepDone.style.display = '';
+  bootstrapDoneDetail.textContent =
+    `共耗时 ${Math.round(info.durationMs / 1000)}s，样本 ${info.uniqueCount} 首。`;
+}
+
+// 启动后检测是否需要首次画像设置
+async function checkBootstrapNeeded() {
+  try {
+    const res = await fetch('/api/health');
+    if (!res.ok) return;
+    const health = await res.json();
+    if (!health.hasTaste) {
+      // 自动弹首次设置
+      setTimeout(() => openBootstrapModal(false), 300);
+    }
+  } catch (e) {
+    console.warn('[bootstrap] health check fail', e);
+  }
+}
+
 // ============================================================
 // UI
 // ============================================================
@@ -563,7 +1028,7 @@ function appendBubble(role, text) {
   if (role !== 'sys') {
     const avatar = document.createElement('div');
     avatar.className = 'avatar';
-    avatar.textContent = role === 'user' ? 'ME' : 'DJ';
+    avatar.textContent = role === 'user' ? 'ME' : 'VOX';
     row.appendChild(avatar);
   }
 
@@ -589,7 +1054,7 @@ function startStreamingBubble(id) {
 
   const avatar = document.createElement('div');
   avatar.className = 'avatar';
-  avatar.textContent = 'DJ';
+  avatar.textContent = 'VOX';
   row.appendChild(avatar);
 
   const bubble = document.createElement('div');
@@ -812,3 +1277,261 @@ if (themePref !== 'auto') {
 }
 updateThemePopupActive();
 connect();
+checkBootstrapNeeded();
+setupTooltips();
+setupChatResize();
+
+// ============================================================
+// 全局 Tooltip（hover data-tip 元素显示中文说明）
+// ============================================================
+function setupTooltips() {
+  const tip = $('tip');
+  if (!tip) return;
+  let showTimer = null;
+  let currentTarget = null;
+
+  const showTip = (target) => {
+    const text = target.getAttribute('data-tip');
+    if (!text) return;
+    tip.textContent = text;
+    // 先放进来让浏览器算宽高
+    tip.style.visibility = 'hidden';
+    tip.classList.add('show');
+    tip.classList.remove('below');
+
+    const rect = target.getBoundingClientRect();
+    const tipRect = tip.getBoundingClientRect();
+    const margin = 10;
+
+    // 默认放在目标上方居中
+    let top = rect.top - tipRect.height - margin;
+    let left = rect.left + rect.width / 2 - tipRect.width / 2;
+
+    // 如果上方空间不够 → 放下方
+    if (top < 4) {
+      top = rect.bottom + margin;
+      tip.classList.add('below');
+    }
+    // 水平溢出保护
+    if (left < 8) left = 8;
+    const maxLeft = window.innerWidth - tipRect.width - 8;
+    if (left > maxLeft) left = maxLeft;
+
+    tip.style.left = left + 'px';
+    tip.style.top = top + 'px';
+    tip.style.visibility = 'visible';
+  };
+
+  const hideTip = () => {
+    tip.classList.remove('show');
+    currentTarget = null;
+    if (showTimer) { clearTimeout(showTimer); showTimer = null; }
+  };
+
+  // mouseover 冒泡更稳（mouseenter 不冒泡，事件委托不好做）
+  document.addEventListener('mouseover', (e) => {
+    const target = e.target.closest?.('[data-tip]');
+    if (!target) return;
+    if (target === currentTarget) return;
+    currentTarget = target;
+    if (showTimer) clearTimeout(showTimer);
+    showTimer = setTimeout(() => showTip(target), 350);
+  });
+
+  document.addEventListener('mouseout', (e) => {
+    const target = e.target.closest?.('[data-tip]');
+    if (!target) return;
+    // 离开到子元素不算离开
+    if (target.contains(e.relatedTarget)) return;
+    if (target === currentTarget) hideTip();
+  });
+
+  // 滚动 / 点击 / 按键 → 立刻隐藏（避免 tip 和元素错位）
+  window.addEventListener('scroll', hideTip, true);
+  document.addEventListener('mousedown', hideTip);
+  document.addEventListener('keydown', hideTip);
+}
+
+// ============================================================
+// 聊天区高度可拖动调整
+// ============================================================
+function setupChatResize() {
+  const CHAT_HEIGHT_KEY = 'vox.chatLogHeight';
+  const CHAT_HEIGHT_MIN = 120;
+  const CHAT_HEIGHT_MAX_RATIO = 0.7; // 最多占屏高 70%
+
+  const handle = $('chatResizeHandle');
+  if (!handle) {
+    console.warn('[chat-resize] handle element not found');
+    return;
+  }
+  console.log('[chat-resize] ready');
+
+  // 应用持久化的高度
+  const saved = Number(localStorage.getItem(CHAT_HEIGHT_KEY));
+  if (saved && saved >= CHAT_HEIGHT_MIN) {
+    applyChatHeight(saved);
+  }
+
+  let dragging = false;
+  let startY = 0;
+  let startHeight = 0;
+
+  const onMove = (e) => {
+    if (!dragging) return;
+    const y = e.touches ? e.touches[0].clientY : e.clientY;
+    const delta = y - startY; // 把手在下方：鼠标往下 → 加高度
+    const maxH = Math.floor(window.innerHeight * CHAT_HEIGHT_MAX_RATIO);
+    const h = Math.max(CHAT_HEIGHT_MIN, Math.min(maxH, startHeight + delta));
+    applyChatHeight(h);
+    if (e.cancelable) e.preventDefault();
+  };
+
+  const onUp = () => {
+    if (!dragging) return;
+    dragging = false;
+    handle.classList.remove('dragging');
+    document.body.classList.remove('resizing-chat');
+    const final = getComputedChatHeight();
+    if (final) localStorage.setItem(CHAT_HEIGHT_KEY, String(final));
+    window.removeEventListener('mousemove', onMove);
+    window.removeEventListener('mouseup', onUp);
+    window.removeEventListener('touchmove', onMove);
+    window.removeEventListener('touchend', onUp);
+    window.removeEventListener('touchcancel', onUp);
+  };
+
+  const onDown = (e) => {
+    dragging = true;
+    startY = e.touches ? e.touches[0].clientY : e.clientY;
+    startHeight = getComputedChatHeight();
+    handle.classList.add('dragging');
+    document.body.classList.add('resizing-chat');
+    window.addEventListener('mousemove', onMove);
+    window.addEventListener('mouseup', onUp);
+    window.addEventListener('touchmove', onMove, { passive: false });
+    window.addEventListener('touchend', onUp);
+    window.addEventListener('touchcancel', onUp);
+    e.preventDefault();
+    e.stopPropagation();
+    console.log('[chat-resize] drag start, h =', startHeight);
+  };
+
+  handle.addEventListener('mousedown', onDown);
+  handle.addEventListener('touchstart', onDown, { passive: false });
+
+  // 双击把手 = 重置为默认高度
+  handle.addEventListener('dblclick', () => {
+    localStorage.removeItem(CHAT_HEIGHT_KEY);
+    applyChatHeight(280);
+  });
+}
+
+function applyChatHeight(h) {
+  document.documentElement.style.setProperty('--chat-log-height', h + 'px');
+}
+
+function getComputedChatHeight() {
+  const styles = getComputedStyle(document.documentElement);
+  const v = styles.getPropertyValue('--chat-log-height').trim();
+  if (v) return parseInt(v, 10) || 280;
+  // 从 chatLog 实际高度读
+  return chatLog.clientHeight || 280;
+}
+
+// ============================================================
+// QQ Cookie 失效弹窗
+// ============================================================
+function showQQAuthModal(reason) {
+  const modal = $('qqAuthModal');
+  if (!modal) return;
+  const reasonEl = $('qqAuthReason');
+  if (reasonEl) {
+    reasonEl.textContent = reason ? `原因：${reason}` : '（未报告具体原因）';
+  }
+  const msg = $('qqAuthMsg');
+  if (msg) {
+    msg.textContent = '粘贴后点"更新并恢复"';
+    msg.className = 'qqauth-msg';
+  }
+  const submit = $('qqAuthSubmit');
+  if (submit) submit.disabled = false;
+  modal.classList.add('show');
+  // 自动 focus textarea（方便直接粘贴）
+  setTimeout(() => $('qqAuthInput')?.focus(), 50);
+}
+
+function hideQQAuthModal() {
+  const modal = $('qqAuthModal');
+  if (!modal) return;
+  modal.classList.remove('show');
+  // 清掉输入框内容，避免 cookie 残留在 DOM
+  const input = $('qqAuthInput');
+  if (input) input.value = '';
+}
+
+function handleQQCookieUpdateResult(result) {
+  const msg = $('qqAuthMsg');
+  const submit = $('qqAuthSubmit');
+  if (submit) submit.disabled = false;
+  if (!msg) return;
+
+  if (result?.ok) {
+    msg.textContent = result.warning || '✅ 已更新，恢复推荐中…';
+    msg.className = 'qqauth-msg ok';
+    // 2 秒后自动关闭 + 触发新 block
+    setTimeout(() => {
+      hideQQAuthModal();
+      // 主动请求一段新的（之前被熔断拒绝了）
+      send('request_block', {});
+    }, 1800);
+  } else {
+    msg.textContent = '❌ ' + (result?.error || '更新失败');
+    msg.className = 'qqauth-msg err';
+  }
+}
+
+function setupQQAuthUI() {
+  const submit = $('qqAuthSubmit');
+  const input = $('qqAuthInput');
+  const closeBtn = $('qqAuthClose');
+  const backdrop = document.querySelector('#qqAuthModal .history-backdrop');
+
+  const doSubmit = () => {
+    const raw = (input?.value || '').trim();
+    if (!raw) {
+      const msg = $('qqAuthMsg');
+      if (msg) {
+        msg.textContent = '请先粘贴 cookie';
+        msg.className = 'qqauth-msg err';
+      }
+      return;
+    }
+    if (submit) submit.disabled = true;
+    const msg = $('qqAuthMsg');
+    if (msg) {
+      msg.textContent = '正在推送并验证…';
+      msg.className = 'qqauth-msg';
+    }
+    send('qq_cookie_update', { cookie: raw });
+  };
+
+  submit?.addEventListener('click', doSubmit);
+  // Cmd/Ctrl + Enter 快速提交
+  input?.addEventListener('keydown', (e) => {
+    if ((e.metaKey || e.ctrlKey) && e.key === 'Enter') {
+      e.preventDefault();
+      doSubmit();
+    }
+  });
+
+  // 关闭按钮 & 点背景：允许关闭但提示
+  const softClose = () => {
+    hideQQAuthModal();
+    setStatus('已忽略 cookie 过期 // 手动点 NEW BLOCK 时会再次弹出');
+  };
+  closeBtn?.addEventListener('click', softClose);
+  backdrop?.addEventListener('click', softClose);
+}
+
+setupQQAuthUI();

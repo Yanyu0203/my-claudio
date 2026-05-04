@@ -71,6 +71,14 @@ function initSchema(db) {
     );
     CREATE INDEX IF NOT EXISTS idx_song_exp ON song_cache(expires_at);
 
+    -- 歌曲负缓存 (1 小时) — 搜过但没结果的不重复打 QQ
+    CREATE TABLE IF NOT EXISTS song_cache_miss (
+      key         TEXT PRIMARY KEY,
+      value_json  TEXT NOT NULL,
+      expires_at  INTEGER NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_song_miss_exp ON song_cache_miss(expires_at);
+
     -- 天气缓存 (30 分钟) -----------------------------------------------------
     CREATE TABLE IF NOT EXISTS weather_cache (
       location    TEXT PRIMARY KEY,
@@ -85,6 +93,13 @@ function initSchema(db) {
       updated_at TEXT NOT NULL
     );
   `);
+
+  // 迁移：老库的 play_history 没有 rating 字段，加上
+  // rating: null = 未评, 'like' = 喜欢, 'dislike' = 不感兴趣
+  const cols = db.prepare(`PRAGMA table_info(play_history)`).all();
+  if (!cols.some((c) => c.name === 'rating')) {
+    db.exec(`ALTER TABLE play_history ADD COLUMN rating TEXT`);
+  }
 }
 
 // ----------------------------- 通用 helper ---------------------------------
@@ -132,5 +147,6 @@ export function purgeExpiredCache() {
   const now = Date.now();
   const db = getDB();
   db.prepare('DELETE FROM song_cache WHERE expires_at < ?').run(now);
+  db.prepare('DELETE FROM song_cache_miss WHERE expires_at < ?').run(now);
   db.prepare('DELETE FROM weather_cache WHERE expires_at < ?').run(now);
 }

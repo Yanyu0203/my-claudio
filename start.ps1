@@ -83,22 +83,21 @@ if (-not (Test-Port 3300)) {
 }
 
 # ---------- 喂 cookie ----------
+# 每次启动都重推：cookie 可能已更新；QQMusicApi 进程内的 cookie 也会在上面重启时丢失
 if (Test-Path $CookieFile) {
-    $existingCookie = Join-Path $QQMusicDir "data\cookie.json"
-    $needFeed = $true
-    if (Test-Path $existingCookie) {
-        if ((Get-Item $existingCookie).Length -gt 100) { $needFeed = $false }
-    }
-    if ($needFeed) {
-        Write-Host "[vox] 喂 cookie..." -ForegroundColor Cyan
-        try {
-            Invoke-RestMethod -Uri "http://127.0.0.1:3300/user/setCookie" `
-                -Method POST -ContentType "application/json" `
-                -InFile $CookieFile | Out-Null
-            Write-Host "[vox] cookie 已设置" -ForegroundColor Green
-        } catch {
-            Write-Host "[vox] cookie 设置失败: $_" -ForegroundColor Yellow
+    Write-Host "[vox] 推送 cookie 到 QQMusicApi..." -ForegroundColor Cyan
+    try {
+        $resp = Invoke-RestMethod -Uri "http://127.0.0.1:3300/user/setCookie" `
+            -Method POST -ContentType "application/json" `
+            -InFile $CookieFile
+        if ($resp.result -eq 100) {
+            Write-Host "[vox] cookie 推送成功" -ForegroundColor Green
+        } else {
+            Write-Host "[vox] ⚠️  cookie 推送响应异常: $($resp | ConvertTo-Json -Compress)" -ForegroundColor Yellow
+            Write-Host "[vox]    （继续启动，但可能只能播非 VIP 歌曲）" -ForegroundColor Yellow
         }
+    } catch {
+        Write-Host "[vox] cookie 推送失败: $_" -ForegroundColor Yellow
     }
 }
 

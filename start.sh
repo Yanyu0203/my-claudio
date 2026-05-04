@@ -64,14 +64,17 @@ else
 fi
 
 # ---------- 喂 cookie (如果 cookie 文件存在) ----------
+# 每次启动都重推：cookie 可能已更新；QQMusicApi 进程内的 cookie 也会在上面重启时丢失
 if [ -f "$COOKIE_FILE" ]; then
-  if [ ! -f "$QQMUSIC_DIR/data/cookie.json" ] || \
-     [ $(stat -f %z "$QQMUSIC_DIR/data/cookie.json" 2>/dev/null || echo 0) -lt 100 ]; then
-    echo "[vox] 喂 cookie 到 QQMusicApi..."
-    curl -s -X POST http://127.0.0.1:3300/user/setCookie \
-      -H "Content-Type: application/json" \
-      -d @"$COOKIE_FILE" > /dev/null
-    echo "[vox] cookie 已设置"
+  echo "[vox] 推送 cookie 到 QQMusicApi..."
+  RESP=$(curl -s -X POST http://127.0.0.1:3300/user/setCookie \
+    -H "Content-Type: application/json" \
+    -d @"$COOKIE_FILE")
+  if echo "$RESP" | grep -q '"result":100'; then
+    echo "[vox] cookie 推送成功"
+  else
+    echo "[vox] ⚠️  cookie 推送响应异常: $RESP"
+    echo "[vox]    （继续启动，但可能只能播非 VIP 歌曲）"
   fi
 fi
 

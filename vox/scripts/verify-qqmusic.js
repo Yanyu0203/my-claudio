@@ -48,7 +48,7 @@ async function main() {
     let any = false;
     for (const s of searchHits) {
       try {
-        const url = await qq.getPlayUrl(s.songmid);
+        const { url } = await qq.getPlayUrl(s.songmid);
         if (url) {
           ok(`【${s.title}】可播：${url.slice(0, 90)}...`);
           any = true;

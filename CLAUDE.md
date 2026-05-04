@@ -65,8 +65,8 @@ $env:OS    # → Windows_NT
 | 7. 喂 cookie 并验证 | ❌ AI 自动 | 1min |
 | 8. 装 Vox + 复制 .env + setup:brain | ❌ AI 自动 | 1min |
 | 9. **填 .env (QQ_UIN, 可选天气)** | ⚠️**STOP** 必须人 | 1min（不接天气）/ 10min（接天气） |
-| 10. 灌口味（生成 taste.md）| ❌ AI 自动（要 1-3min）| 3min |
-| 11. 启动 + 验证 | ❌ AI 自动 | 1min |
+| 10. ~~灌口味（生成 taste.md）~~ | ✅ 交给用户在网页做（不属于 AI 职责） | — |
+| 11. 启动 Vox + 引导用户做画像 | ❌ AI 自动启动 + 说明 | 1min |
 
 ---
 
@@ -455,55 +455,23 @@ sed -i '' "s/^QQ_UIN=.*/QQ_UIN=<QQ_UIN>/" <ROOT>/vox/.env
 
 ---
 
-## 阶段 10：灌口味 — 生成 taste.md
+## 阶段 10：~~（已移除）灌口味 taste.md~~
 
-### 动作 10.1 — 列出用户的歌单（先看能不能拿到目标歌单）
+**这一步现在在网页里做，AI 不再参与。**
 
-```bash
-cd <ROOT>/vox
-npm run verify:qq 2>&1 | grep -A 20 "拉我的歌单"
-```
+老版本这里是 AI 跑 `npm run bootstrap:taste` 生成 `data/taste.md`。但那个脚本硬编码了歌单名（`这段爱听` / `好歌`），只有少数用户能命中，扩展性差。
 
-看用户有没有 `这段爱听` 和 `好歌` 这两个歌单（默认目标）。
+现在：Vox 首次启动时，浏览器**自动弹画像设置向导**，由用户自己：
+1. 看自己有哪些歌单
+2. 勾选要灌的
+3. 选每个的抽样方式（全量 / 随机 N / 前 N）
+4. 进度条实时反馈 → 60-180s 后生成 `taste.md`
 
-如果**都没有**：
-
-> 问用户："你的 QQ 音乐里没有 '这段爱听' 或 '好歌' 这两个歌单。
-> 要不你告诉我**两个你最常听的歌单名**？我会改 bootstrap 脚本去抓那两个。"
-
-得到名字后，编辑 `<ROOT>/vox/scripts/bootstrap-taste.js`，把这一行改成用户给的：
-
-```js
-const TARGET_PLAYLIST_NAMES = ['歌单名1', '歌单名2'];
-```
-
-### 动作 10.2 — 跑 bootstrap
-
-```bash
-cd <ROOT>/vox
-npm run bootstrap:taste
-```
-
-⏱️ **预计 1-3 分钟**，CodeBuddy 思考时间不可控。耐心等。
-
-期望最后看到：
-
-```
-✅ 已写入 <ROOT>/data/taste.md
-```
-
-### 动作 10.3 — 给用户看一眼结果
-
-```bash
-cat <ROOT>/data/taste.md   # macOS
-# Windows: Get-Content <ROOT>\data\taste.md
-```
-
-把内容贴给用户看，问 TA："这是大脑分析出来的你的音乐画像，看着对劲吗？要不要重跑一次？"
+所以 AI 在这一步**什么也不用做**，直接进阶段 11（启动），让用户在浏览器里完成画像。
 
 ---
 
-## 阶段 11：启动 + 验证
+## 阶段 11：启动 + 引导用户做画像
 
 ### 动作 11.1 — 一键启动
 
@@ -539,17 +507,33 @@ curl -s http://localhost:8080/api/health
 期望返回：
 
 ```json
-{"ok":true, "dataDir":"...", "historyCount":N, "messageCount":N}
+{"ok":true, "dataDir":"...", "historyCount":N, "messageCount":N, "hasTaste":false}
 ```
 
-### 动作 11.3 — 验证 WebSocket（端到端）
+`hasTaste: false` 正常，接下来用户要在网页里生成。
 
-可以跑一个 Node 脚本（或用 wscat）连一下 `/stream`，看能否在 60 秒内收到 `block` 事件。
+### 动作 11.3 — 让用户在浏览器里完成画像设置
 
-或更简单：**让用户打开浏览器**：
+> 告诉用户："Vox 跑起来了！请打开 http://localhost:8080 。
+>
+> 第一次打开会自动弹 **INITIALIZE TASTE** 窗口，让你选要灌哪些歌单。
+>
+> - 选你最常听 / 最有代表性的歌单（1-3 个就够）
+> - 每个指定抽样方式：全量（<=200 首的精华歌单）/ 随机 N（大歌单，建议 100）/ 前 N
+> - 点开始 → 进度条跑 60-180 秒 → 画像生成完毕 → 页面刷新开始播放
+>
+> 遇到什么问题跟我说。"
 
-> 告诉用户："Vox 跑起来了！请打开 http://localhost:8080 ，等 10-30 秒大脑思考完，应该开始播第一首歌。
-> 如果一直卡在 'AI THINKING'，告诉我，我看 `logs/vox.log`。"
+**AI 不要替用户选歌单**——这是用户的音乐人格，用户自己选最准。
+
+### 动作 11.4 — 用户反馈"在播了"时，收尾
+
+问一下用户：
+1. 画像生成完毕了吗？（看 `data/taste.md` 是否存在且非空）
+2. 开始播第一首歌了吗？
+3. DJ 开场白有没有出现？
+
+如果都好 → 进入"AI 行为准则"末尾的收尾总结。
 
 ---
 
@@ -563,7 +547,8 @@ curl -s http://localhost:8080/api/health
 | `setCookie` 失败 | 7 | cookie 文件 JSON 格式错（多半是带双引号字段没清干净） |
 | 拿不到歌单 | 7.3 | QQMusicApi 启动时没带 `QQ=` 参数；杀掉重启 |
 | 直链都为空 | 7.3 | 用户没 VIP（可接受）；或 cookie 没生效（重做 7.2） |
-| `bootstrap:taste` 报"找不到目标歌单" | 10 | 改 `TARGET_PLAYLIST_NAMES` |
+| 浏览器没弹画像设置窗口 | 11.3 | 可能 `data/taste.md` 已存在。让用户点右上角 ✦ RESET TASTE 按钮手动触发 |
+| 画像生成一直卡在 THINKING | 11.3 | CodeBuddy 慢是正常的，给 3 分钟；超过 8 分钟会超时。看 `logs/vox.log` |
 | 浏览器一直 'AI THINKING' | 11 | 看 logs/vox.log；常见 codebuddy 调用超时 |
 | Windows: 脚本不能执行 | 11 | `Set-ExecutionPolicy -Scope CurrentUser -ExecutionPolicy RemoteSigned` |
 
@@ -577,7 +562,7 @@ curl -s http://localhost:8080/api/health
 4. **遇到错误**优先查上面"错误处理"表，再看 SETUP.md「常见错误对照表」
 5. **不要静默修改** `vox/` 源代码（除非用户明确要求 + 你说清楚改了啥）
 6. **不要 `git commit`** 任何东西，除非用户要求
-7. 整个流程跑通后，**给用户一个简短总结**：哪些跑通了、哪些是用户后续可调的（比如改 taste 目标歌单、加天气、调 .env 中参数）
+7. 整个流程跑通后，**给用户一个简短总结**：哪些跑通了、哪些是用户后续可调的（比如在网页里重置画像、加天气、调 .env 中参数）
 
 ---
 
@@ -602,6 +587,6 @@ curl -s http://localhost:8080/api/health
   ./start.sh        (Mac)
   .\start.ps1       (Windows)
 
-要换灌口味用的歌单 → 改 vox/scripts/bootstrap-taste.js
+画像（taste.md）想换歌单/重新生成 → 浏览器右上角 ✦ RESET TASTE 按钮
 要加/改天气 → 改 vox/.env
 ```

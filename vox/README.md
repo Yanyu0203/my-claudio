@@ -82,7 +82,8 @@ const songs = await qq.search('晴天 周杰伦', 5);
 // → [{ songmid, title, artist, album, duration }]
 
 // 拿 mp3 直链
-const url = await qq.getPlayUrl('003OUlho2HcRHC');
+const { url, authFail } = await qq.getPlayUrl('003OUlho2HcRHC');
+// authFail=true 表示 QQ cookie 过期（路 A 返回 result=400）
 
 // 拉我的所有歌单
 const playlists = await qq.getMyPlaylists();

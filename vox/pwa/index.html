@@ -274,7 +274,7 @@
     transition: opacity .4s;
   }
   .dj-say::before {
-    content: '> DJ //';
+    content: '> VOX //';
     color: var(--neon-pri); margin-right: 8px;
     font-weight: 700; letter-spacing: 1px;
     text-shadow: 0 0 8px var(--neon-pri);
@@ -512,6 +512,33 @@
     box-shadow: 0 0 20px var(--neon-sec);
   }
 
+  /* 当前歌的"喜欢 / 不感兴趣"按钮 —— 默认灰，激活后高亮 */
+  .btn-rate-now {
+    position: relative;
+    transition: all .18s;
+  }
+  .btn-rate-now[data-rating="like"].active {
+    background: var(--neon-pri);
+    color: var(--bg-1);
+    border-color: var(--neon-pri);
+    font-weight: 700;
+    box-shadow: 0 0 14px color-mix(in srgb, var(--neon-pri) 60%, transparent);
+  }
+  .btn-rate-now[data-rating="dislike"].active {
+    background: var(--fg-dim);
+    color: var(--bg-1);
+    border-color: var(--fg-dim);
+    font-weight: 700;
+  }
+  .btn-rate-now.just-clicked {
+    animation: rateFlash .4s ease-out;
+  }
+  @keyframes rateFlash {
+    0%   { transform: scale(1); }
+    40%  { transform: scale(1.08); }
+    100% { transform: scale(1); }
+  }
+
   /* ===========================================================
      队列
      =========================================================== */
@@ -559,6 +586,42 @@
     display: flex; flex-direction: column; gap: 10px;
     position: relative;
   }
+  /* chat-log 与输入框之间的 resize 把手（拖动调整聊天区高度） */
+  .chat-resize-handle {
+    position: relative;
+    width: 100%; height: 14px;
+    cursor: ns-resize;
+    display: flex; align-items: center; justify-content: center;
+    z-index: 5;
+    touch-action: none;
+    -webkit-user-select: none; user-select: none;
+    margin: -2px 0;
+  }
+  .chat-resize-handle::before {
+    content: '';
+    width: 56px; height: 4px;
+    background: rgba(255,255,255,.25);
+    border-radius: 2px;
+    transition: all .15s;
+  }
+  .chat-resize-handle:hover::before {
+    background: var(--neon-pri);
+    box-shadow: 0 0 10px var(--neon-pri);
+    width: 72px;
+    height: 5px;
+  }
+  .chat-resize-handle.dragging::before {
+    background: var(--neon-pri);
+    box-shadow: 0 0 14px var(--neon-pri);
+    width: 80px;
+    height: 5px;
+  }
+  /* 拖动时禁用文字选中（手感更好） */
+  body.resizing-chat,
+  body.resizing-chat * {
+    user-select: none !important;
+    cursor: ns-resize !important;
+  }
   .chat::before {
     content: 'COMM CHANNEL // OPEN';
     position: absolute; top: -8px; left: 12px;
@@ -566,8 +629,27 @@
     font-size: 10px; color: var(--neon-acc);
     letter-spacing: 2px;
   }
+
+  /* 清空对话按钮（右上角小角标） */
+  .chat-clear {
+    position: absolute; top: -10px; right: 12px;
+    background: var(--bg-1); padding: 0 8px;
+    font-size: 10px; color: var(--fg-dim);
+    letter-spacing: 2px;
+    border: 1px solid rgba(255,255,255,.12);
+    cursor: pointer;
+    font-family: inherit;
+    transition: all .2s;
+    height: 18px;
+    line-height: 16px;
+  }
+  .chat-clear:hover {
+    color: var(--warn, #ffb800);
+    border-color: var(--warn, #ffb800);
+  }
   .chat-log {
-    max-height: 280px; overflow-y: auto;
+    height: var(--chat-log-height, 280px);
+    overflow-y: auto;
     display: flex; flex-direction: column; gap: 10px;
     font-size: 13px; padding: 6px 4px;
     scroll-behavior: smooth;
@@ -768,12 +850,395 @@
     50% { opacity: 1; transform: scale(1.1); }
   }
 
+  /* ===========================================================
+     播放历史 Modal
+     =========================================================== */
+  .history-modal {
+    position: fixed; inset: 0; z-index: 1000;
+    display: none;
+    align-items: center; justify-content: center;
+  }
+  .history-modal.show { display: flex; }
+  .history-backdrop {
+    position: absolute; inset: 0;
+    background: rgba(0,0,0,.65);
+    backdrop-filter: blur(4px);
+    animation: fadeIn .2s ease-out;
+  }
+  @keyframes fadeIn { from { opacity: 0; } to { opacity: 1; } }
+  .history-panel {
+    position: relative;
+    width: min(90vw, 720px);
+    max-height: 80vh;
+    background: var(--bg-1);
+    border: 1px solid var(--neon-pri);
+    box-shadow: 0 0 40px color-mix(in srgb, var(--neon-pri) 30%, transparent);
+    display: flex; flex-direction: column;
+    animation: panelIn .25s ease-out;
+  }
+  @keyframes panelIn {
+    from { opacity: 0; transform: translateY(10px) scale(.98); }
+    to   { opacity: 1; transform: translateY(0) scale(1); }
+  }
+  .history-head {
+    padding: 16px 20px 10px;
+    display: flex; align-items: center; justify-content: space-between;
+    border-bottom: 1px solid rgba(255,255,255,.06);
+  }
+  .history-title {
+    font-size: 14px; font-weight: 700;
+    color: var(--neon-pri);
+    letter-spacing: 4px;
+    text-shadow: 0 0 8px var(--neon-pri);
+  }
+  .history-close {
+    background: transparent; border: 1px solid rgba(255,255,255,.15);
+    color: var(--fg-dim); cursor: pointer;
+    width: 28px; height: 28px;
+    font-family: inherit; font-size: 14px;
+    transition: all .15s;
+  }
+  .history-close:hover {
+    color: var(--warn, #ffb800);
+    border-color: var(--warn, #ffb800);
+  }
+  .history-sub {
+    padding: 10px 20px;
+    font-size: 11px; color: var(--fg-dim);
+    line-height: 1.5;
+    border-bottom: 1px solid rgba(255,255,255,.04);
+  }
+  .rate-hint { font-weight: 700; padding: 0 1px; }
+  .rate-hint.rate-like { color: var(--neon-pri); }
+  .rate-hint.rate-dislike { color: var(--fg-dim); }
+
+  .history-list {
+    padding: 8px 12px 16px;
+    overflow-y: auto;
+    flex: 1;
+  }
+  .history-list::-webkit-scrollbar { width: 4px; }
+  .history-list::-webkit-scrollbar-thumb { background: var(--neon-pri); }
+
+  .history-item {
+    display: flex; align-items: center; gap: 12px;
+    padding: 10px 10px;
+    border-bottom: 1px dashed rgba(255,255,255,.04);
+    transition: background .12s;
+  }
+  .history-item:hover {
+    background: rgba(255,255,255,.02);
+  }
+  .history-item .idx {
+    font-size: 10px; color: var(--fg-dim);
+    width: 24px; flex-shrink: 0;
+  }
+  .history-item .info {
+    flex: 1; min-width: 0;
+  }
+  .history-item .t {
+    font-size: 13px; color: var(--fg);
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  }
+  .history-item .a {
+    font-size: 11px; color: var(--fg-dim);
+    margin-top: 2px;
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  }
+  .history-item .skip-badge {
+    font-size: 9px; color: var(--warn, #ffb800);
+    margin-left: 6px; letter-spacing: 1px;
+  }
+  .history-item .time {
+    font-size: 10px; color: var(--fg-dim);
+    flex-shrink: 0;
+    min-width: 60px; text-align: right;
+  }
+  .history-item .rate {
+    display: flex; gap: 4px;
+    flex-shrink: 0;
+  }
+  .history-item .rate button {
+    width: 28px; height: 28px;
+    background: transparent;
+    border: 1px solid rgba(255,255,255,.12);
+    color: var(--fg-dim);
+    cursor: pointer; font-family: inherit;
+    font-size: 14px; line-height: 1;
+    transition: all .15s;
+  }
+  .history-item .rate button:hover {
+    border-color: var(--neon-pri);
+    color: var(--neon-pri);
+  }
+  .history-item .rate button.active.like {
+    background: var(--neon-pri); color: var(--bg-1);
+    border-color: var(--neon-pri);
+    box-shadow: 0 0 8px var(--neon-pri);
+  }
+  .history-item .rate button.active.dislike {
+    background: var(--fg-dim); color: var(--bg-1);
+    border-color: var(--fg-dim);
+  }
+
+  .history-empty {
+    text-align: center; padding: 40px 20px;
+    color: var(--fg-dim); font-size: 12px;
+  }
+
+  /* ===========================================================
+     Tooltip （hover 提示）
+     =========================================================== */
+  .tip {
+    position: fixed; z-index: 2000;
+    padding: 6px 10px;
+    background: rgba(10, 6, 18, 0.95);
+    border: 1px solid var(--neon-pri);
+    color: var(--fg);
+    font-size: 11px;
+    letter-spacing: .5px;
+    line-height: 1.4;
+    pointer-events: none;
+    white-space: nowrap;
+    max-width: 260px;
+    box-shadow:
+      0 0 12px color-mix(in srgb, var(--neon-pri) 40%, transparent),
+      0 4px 20px rgba(0,0,0,.6);
+    opacity: 0;
+    transform: translateY(2px);
+    transition: opacity .15s ease, transform .15s ease;
+    backdrop-filter: blur(8px);
+  }
+  .tip.show {
+    opacity: 1;
+    transform: translateY(0);
+  }
+  .tip::before {
+    content: '';
+    position: absolute;
+    bottom: -5px; left: 50%;
+    transform: translateX(-50%) rotate(45deg);
+    width: 8px; height: 8px;
+    background: rgba(10, 6, 18, 0.95);
+    border-right: 1px solid var(--neon-pri);
+    border-bottom: 1px solid var(--neon-pri);
+  }
+  .tip.below::before {
+    bottom: auto; top: -5px;
+    border-right: none; border-bottom: none;
+    border-left: 1px solid var(--neon-pri);
+    border-top: 1px solid var(--neon-pri);
+  }
+
+  /* ===========================================================
+     Bootstrap (画像冷启动) 专属样式
+     =========================================================== */
+  .bootstrap-panel { width: min(92vw, 620px); }
+
+  .bootstrap-step { display: flex; flex-direction: column; min-height: 0; flex: 1; }
+
+  .bootstrap-list {
+    overflow-y: auto;
+    padding: 6px 12px;
+    flex: 1;
+  }
+  .bootstrap-list::-webkit-scrollbar { width: 4px; }
+  .bootstrap-list::-webkit-scrollbar-thumb { background: var(--neon-pri); }
+
+  .bs-item {
+    display: flex; align-items: center; gap: 12px;
+    padding: 10px 10px;
+    border-bottom: 1px dashed rgba(255,255,255,.04);
+  }
+  .bs-item .chk {
+    width: 18px; height: 18px;
+    flex-shrink: 0;
+    border: 1px solid rgba(255,255,255,.2);
+    cursor: pointer;
+    position: relative;
+    transition: all .15s;
+  }
+  .bs-item .chk.on {
+    background: var(--neon-pri);
+    border-color: var(--neon-pri);
+    box-shadow: 0 0 8px var(--neon-pri);
+  }
+  .bs-item .chk.on::after {
+    content: '✓';
+    position: absolute; inset: 0;
+    display: flex; align-items: center; justify-content: center;
+    color: var(--bg-1); font-weight: 700;
+    font-size: 11px;
+  }
+  .bs-item .pl-info {
+    flex: 1; min-width: 0;
+  }
+  .bs-item .pl-name {
+    font-size: 13px; color: var(--fg);
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  }
+  .bs-item .pl-meta {
+    font-size: 10px; color: var(--fg-dim);
+    margin-top: 2px;
+  }
+  .bs-item .pl-strategy {
+    flex-shrink: 0;
+    display: flex; gap: 4px;
+    opacity: .45;
+    transition: opacity .15s;
+  }
+  .bs-item.picked .pl-strategy { opacity: 1; }
+  .pl-strategy select, .pl-strategy input {
+    background: rgba(0,0,0,.4);
+    border: 1px solid rgba(255,255,255,.15);
+    color: var(--fg);
+    font-family: inherit; font-size: 11px;
+    padding: 4px 6px;
+    outline: none;
+  }
+  .pl-strategy select:focus, .pl-strategy input:focus {
+    border-color: var(--neon-pri);
+  }
+  .pl-strategy input { width: 56px; text-align: right; }
+  .pl-strategy input:disabled {
+    opacity: .3; background: transparent;
+  }
+
+  .bootstrap-actions {
+    padding: 14px 20px;
+    border-top: 1px solid rgba(255,255,255,.06);
+    display: flex; align-items: center; justify-content: space-between;
+    gap: 12px;
+  }
+  .bootstrap-stats {
+    font-size: 11px; color: var(--fg-dim);
+  }
+
+  /* 进度视图 */
+  .bootstrap-progress-wrap {
+    padding: 30px 24px 20px;
+    display: flex; flex-direction: column; gap: 14px;
+  }
+  .bootstrap-stage {
+    font-size: 13px; color: var(--fg-dim);
+    letter-spacing: 4px; text-transform: uppercase;
+    text-align: center;
+  }
+  .bootstrap-bar {
+    height: 6px;
+    background: rgba(255,255,255,.06);
+    border: 1px solid rgba(255,255,255,.06);
+    overflow: hidden;
+  }
+  .bootstrap-bar-fill {
+    height: 100%; width: 0%;
+    background: linear-gradient(90deg, var(--neon-pri), var(--neon-sec), var(--neon-acc));
+    background-size: 200% 100%;
+    box-shadow: 0 0 10px var(--neon-pri);
+    transition: width .4s ease-out;
+    animation: gradientShift 2s linear infinite;
+  }
+  .bootstrap-detail {
+    text-align: center;
+    font-size: 12px; color: var(--neon-pri);
+    min-height: 18px;
+  }
+  .bootstrap-log {
+    margin-top: 10px;
+    max-height: 180px; overflow-y: auto;
+    font-size: 10px; color: var(--fg-dim);
+    background: rgba(0,0,0,.3);
+    border: 1px solid rgba(255,255,255,.04);
+    padding: 10px 12px;
+    line-height: 1.5;
+    font-family: inherit;
+  }
+  .bootstrap-log::-webkit-scrollbar { width: 3px; }
+  .bootstrap-log::-webkit-scrollbar-thumb { background: var(--neon-pri); opacity: .5; }
+  .bootstrap-log .log-row { padding: 2px 0; }
+  .bootstrap-log .log-row.err { color: var(--warn, #ffb800); }
+
   /* 响应式 */
   @media (max-width: 600px) {
     .np-row { flex-direction: column; align-items: center; text-align: center; }
     .cover-wrap { width: 200px; height: 200px; }
     .logo { font-size: 24px; letter-spacing: 6px; }
   }
+
+  /* ===========================================================
+     QQ Cookie 失效 Modal
+     =========================================================== */
+  .qqauth-modal .history-panel {
+    width: min(92vw, 640px);
+    border-color: var(--warn, #ffb800);
+    box-shadow: 0 0 40px color-mix(in srgb, var(--warn, #ffb800) 30%, transparent);
+  }
+  .qqauth-modal .history-title {
+    color: var(--warn, #ffb800);
+    text-shadow: 0 0 8px var(--warn, #ffb800);
+  }
+  .qqauth-body {
+    padding: 16px 20px 8px;
+    font-size: 12px; color: var(--fg);
+    line-height: 1.7;
+  }
+  .qqauth-body h4 {
+    font-size: 12px;
+    color: var(--neon-pri);
+    margin: 14px 0 6px;
+    letter-spacing: 2px;
+  }
+  .qqauth-body h4:first-child { margin-top: 0; }
+  .qqauth-body ol { padding-left: 20px; margin: 4px 0; }
+  .qqauth-body li { margin: 3px 0; }
+  .qqauth-body code {
+    background: rgba(255,255,255,.06);
+    padding: 1px 5px;
+    font-size: 11px;
+    color: var(--neon-sec);
+    border-radius: 2px;
+  }
+  .qqauth-reason {
+    font-size: 10px; color: var(--fg-dim);
+    font-family: inherit;
+    word-break: break-all;
+    margin-top: 6px;
+    padding: 6px 10px;
+    background: rgba(255,184,0,.08);
+    border-left: 2px solid var(--warn, #ffb800);
+  }
+  .qqauth-textarea {
+    width: 100%;
+    min-height: 110px;
+    max-height: 240px;
+    box-sizing: border-box;
+    padding: 10px 12px;
+    font-family: inherit;
+    font-size: 11px;
+    line-height: 1.5;
+    color: var(--fg);
+    background: rgba(0,0,0,.5);
+    border: 1px solid rgba(255,255,255,.1);
+    resize: vertical;
+    outline: none;
+    margin-top: 6px;
+  }
+  .qqauth-textarea:focus {
+    border-color: var(--neon-pri);
+    box-shadow: 0 0 6px color-mix(in srgb, var(--neon-pri) 30%, transparent);
+  }
+  .qqauth-actions {
+    padding: 10px 20px 18px;
+    display: flex; gap: 10px; justify-content: flex-end;
+    align-items: center;
+  }
+  .qqauth-msg {
+    flex: 1;
+    font-size: 11px;
+    color: var(--fg-dim);
+  }
+  .qqauth-msg.err { color: var(--warn, #ffb800); }
+  .qqauth-msg.ok { color: var(--neon-pri); }
 </style>
 </head>
 <body class="theme-cyber">
@@ -788,7 +1253,9 @@
       <div id="status" class="">SYS // CONNECTING</div>
       <div>
         <span id="weatherInfo" class="weather"></span>
-        <span id="themeSwitch" class="theme-switch" title="切换主题">⚙</span>
+        <span id="resetTasteBtn" class="theme-switch" data-tip="重新生成音乐画像">♻</span>
+        <span id="historyBtn" class="theme-switch" data-tip="播放历史 / 给歌打分 ♥ ✕">⏱</span>
+        <span id="themeSwitch" class="theme-switch" data-tip="切换界面主题">⚙</span>
       </div>
       <div id="themePopup" class="theme-popup">
         <div class="group-title">THEME // SELECT</div>
@@ -893,9 +1360,11 @@
     </div>
 
     <div class="controls">
-      <button id="btnPlay" class="btn primary">▶ PLAY</button>
-      <button id="btnNext" class="btn">⏭ NEXT</button>
-      <button id="btnRegen" class="btn">⟳ NEW BLOCK</button>
+      <button id="btnPlay" class="btn primary" data-tip="播放 / 暂停">▶ PLAY</button>
+      <button id="btnNext" class="btn" data-tip="跳过这首">⏭ NEXT</button>
+      <button id="btnLike" class="btn btn-rate-now" data-rating="like" data-tip="喜欢这首 — 会影响 Vox 以后的选歌">♥ LIKE</button>
+      <button id="btnDislike" class="btn btn-rate-now" data-rating="dislike" data-tip="不感兴趣 — 会影响 Vox 以后的选歌">✕ NOPE</button>
+      <button id="btnRegen" class="btn" data-tip="立即重新编排一段（丢弃当前队列）">⟳ NEW BLOCK</button>
     </div>
 
     <audio id="audio" preload="auto"></audio>
@@ -907,9 +1376,11 @@
   </section>
 
   <section class="chat">
+    <button id="btnClearChat" class="chat-clear" data-tip="清空对话历史（不影响画像和播放记录）">CLEAR</button>
     <div id="chatLog" class="chat-log"></div>
+    <div id="chatResizeHandle" class="chat-resize-handle" data-tip="拖动调整聊天区大小 / 双击重置"></div>
     <form id="chatForm" class="chat-input" autocomplete="off">
-      <input id="chatInput" type="text" placeholder="// 跟 DJ 说点啥... &quot;想听点轻松的&quot;" />
+      <input id="chatInput" type="text" placeholder="// 跟 Vox 说点啥... &quot;介绍一下你自己&quot;" />
       <button type="submit">SEND</button>
     </form>
   </section>
@@ -918,6 +1389,105 @@
     VOX v0.1 · CYBERFM · CODEBUDDY × QQ_MUSIC × QWEATHER
   </footer>
 </div>
+
+<!-- 播放历史 Modal -->
+<div id="historyModal" class="history-modal">
+  <div class="history-backdrop"></div>
+  <div class="history-panel">
+    <div class="history-head">
+      <div class="history-title">PLAY HISTORY</div>
+      <button id="historyClose" class="history-close" title="关闭">✕</button>
+    </div>
+    <div class="history-sub">
+      你的每一次 <span class="rate-hint rate-like">♥</span> 或 <span class="rate-hint rate-dislike">✕</span> 都会悄悄写进画像，影响未来的选歌。
+    </div>
+    <div id="historyList" class="history-list"></div>
+  </div>
+</div>
+
+<!-- 画像冷启动 / 重置 Modal -->
+<div id="bootstrapModal" class="history-modal">
+  <div class="history-backdrop"></div>
+  <div class="history-panel bootstrap-panel">
+    <div class="history-head">
+      <div class="history-title" id="bootstrapTitle">INITIALIZE TASTE</div>
+      <button id="bootstrapClose" class="history-close" title="关闭">✕</button>
+    </div>
+
+    <!-- Step 1: 选歌单 -->
+    <div id="bootstrapStepPick" class="bootstrap-step">
+      <div class="history-sub">
+        选择你想让 Vox 读取的歌单，并为每个选择抽样方式。
+        <br><span style="color: var(--fg-dim)">"全量"适合精华歌单（&lt;200 首），"随机 N"适合大歌单，"前 N"适合按时间排序的"最近听"。</span>
+      </div>
+      <div id="bootstrapPlaylists" class="bootstrap-list">
+        <div class="history-empty">正在拉取你的歌单...</div>
+      </div>
+      <div class="bootstrap-actions">
+        <div id="bootstrapPickStats" class="bootstrap-stats"></div>
+        <button id="bootstrapGoBtn" class="btn primary" disabled>开始生成画像</button>
+      </div>
+    </div>
+
+    <!-- Step 2: 生成中 -->
+    <div id="bootstrapStepProgress" class="bootstrap-step" style="display: none;">
+      <div class="bootstrap-progress-wrap">
+        <div class="bootstrap-stage" id="bootstrapStage">STARTING</div>
+        <div class="bootstrap-bar">
+          <div class="bootstrap-bar-fill" id="bootstrapBarFill"></div>
+        </div>
+        <div class="bootstrap-detail" id="bootstrapDetail">准备中...</div>
+        <div class="bootstrap-log" id="bootstrapLog"></div>
+      </div>
+    </div>
+
+    <!-- Step 3: 完成 -->
+    <div id="bootstrapStepDone" class="bootstrap-step" style="display: none;">
+      <div style="text-align: center; padding: 30px 20px;">
+        <div style="font-size: 48px; color: var(--neon-pri); text-shadow: 0 0 20px var(--neon-pri); margin-bottom: 16px;">✦</div>
+        <div style="font-size: 16px; color: var(--fg); margin-bottom: 8px;">画像生成完毕</div>
+        <div id="bootstrapDoneDetail" style="font-size: 11px; color: var(--fg-dim); margin-bottom: 24px;"></div>
+        <button id="bootstrapDoneBtn" class="btn primary">刷新页面开始使用新画像</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- QQ Cookie 失效 Modal -->
+<div id="qqAuthModal" class="history-modal qqauth-modal">
+  <div class="history-backdrop"></div>
+  <div class="history-panel">
+    <div class="history-head">
+      <div class="history-title">⚠ QQ COOKIE 失效</div>
+      <button id="qqAuthClose" class="history-close" title="先关闭（Vox 会暂停推荐，下次恢复后需手动触发）">✕</button>
+    </div>
+    <div class="qqauth-body">
+      <h4>发生了什么？</h4>
+      Vox 连接 QQ 音乐用的 cookie 已过期或无效，拿不到歌曲直链。
+      为了不浪费大脑额度，<strong>Vox 已暂停推荐新歌单</strong>。
+      粘贴新 cookie 即可恢复。
+      <div class="qqauth-reason" id="qqAuthReason">（熔断原因会显示在这里）</div>
+
+      <h4>怎么复制新 cookie（30 秒）</h4>
+      <ol>
+        <li>浏览器登录 <code>https://y.qq.com</code></li>
+        <li>按 <code>F12</code> 打开开发者工具 → <strong>Network</strong> 标签</li>
+        <li>页面随便点一下（比如点"我的音乐"）让它产生请求</li>
+        <li>随便点一个请求 → 右侧 <strong>Headers</strong> → 翻到 <strong>Request Headers</strong> → 找到 <code>Cookie:</code> 那行</li>
+        <li>复制整段（通常很长，要包含 <code>uin=</code> 和 <code>qm_keyst=</code>），粘贴到下面 ↓</li>
+      </ol>
+
+      <textarea id="qqAuthInput" class="qqauth-textarea" spellcheck="false" placeholder="把整段 cookie 粘在这里…（以 pgv_pvid=... 开头，分号分隔）"></textarea>
+    </div>
+    <div class="qqauth-actions">
+      <div id="qqAuthMsg" class="qqauth-msg">粘贴后点"更新并恢复"</div>
+      <button id="qqAuthSubmit" class="btn primary">更新并恢复</button>
+    </div>
+  </div>
+</div>
+
+<!-- 全局 tooltip（JS 驱动，hover data-tip 元素时展示） -->
+<div id="tip" class="tip"></div>
 
 <script src="app.js"></script>
 </body>

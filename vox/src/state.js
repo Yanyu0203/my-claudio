@@ -48,20 +48,93 @@ export class Store {
       );
   }
 
-  /** 最近 N 条播放记录（按时间倒序取再正序返回） */
+  /** 最近 N 条播放记录（按时间倒序取再正序返回），供大脑 prompt 用 */
   recentPlays(n = HIST_RETURN_DEFAULT) {
     const rows = this.db
       .prepare(
-        'SELECT ts, title, artist, played, reason FROM play_history ORDER BY id DESC LIMIT ?'
+        'SELECT id, ts, title, artist, played, reason, rating FROM play_history ORDER BY id DESC LIMIT ?'
       )
       .all(n);
     return rows.reverse().map((r) => ({
+      id: r.id,
       ts: r.ts,
       title: r.title,
       artist: r.artist,
       played: !!r.played,
       reason: r.reason || '',
+      rating: r.rating || null,
     }));
+  }
+
+  /** 给 UI 历史列表用：倒序返回最近 N 首，默认 50 */
+  historyForDisplay(n = 50) {
+    const rows = this.db
+      .prepare(
+        'SELECT id, ts, title, artist, played, reason, rating FROM play_history ORDER BY id DESC LIMIT ?'
+      )
+      .all(n);
+    return rows.map((r) => ({
+      id: r.id,
+      ts: r.ts,
+      title: r.title,
+      artist: r.artist,
+      played: !!r.played,
+      reason: r.reason || '',
+      rating: r.rating || null,
+    }));
+  }
+
+  /**
+   * 用户对某条历史记录打分
+   * @param {number} id            play_history 表的 id
+   * @param {'like'|'dislike'|null} rating
+   * @returns {{title, artist, rating, prev} | null}
+   */
+  rateSong(id, rating) {
+    if (!Number.isInteger(id)) return null;
+    if (rating !== 'like' && rating !== 'dislike' && rating !== null) return null;
+    const row = this.db
+      .prepare('SELECT title, artist, rating FROM play_history WHERE id = ?')
+      .get(id);
+    if (!row) return null;
+    this.db.prepare('UPDATE play_history SET rating = ? WHERE id = ?').run(rating, id);
+    return {
+      title: row.title,
+      artist: row.artist,
+      rating,
+      prev: row.rating || null,
+    };
+  }
+
+  /**
+   * 按 title+artist 给"当前这首"打分
+   * 找最近一条匹配的行：有就 UPDATE；没有就 INSERT 一条占位行
+   * （还没到 played 事件时，正在播的这首可能还不在表里）
+   * @returns {{title, artist, rating, prev} | null}
+   */
+  rateByTitleArtist(title, artist, rating) {
+    if (!title || !artist) return null;
+    if (rating !== 'like' && rating !== 'dislike' && rating !== null) return null;
+
+    // 找最近一条：title+artist 完全匹配
+    const row = this.db
+      .prepare(
+        'SELECT id, rating FROM play_history WHERE title = ? AND artist = ? ORDER BY id DESC LIMIT 1'
+      )
+      .get(String(title), String(artist));
+
+    if (row) {
+      this.db.prepare('UPDATE play_history SET rating = ? WHERE id = ?').run(rating, row.id);
+      return { title, artist, rating, prev: row.rating || null };
+    }
+
+    // 没找到 → 预先插一条占位（played=0，等真"listened through"时那条 played 事件会再 INSERT 一条，就留两条，但评分在这里）
+    this.db
+      .prepare(
+        'INSERT INTO play_history (ts, title, artist, played, reason, rating) VALUES (?, ?, ?, 0, NULL, ?)'
+      )
+      .run(new Date().toISOString(), String(title), String(artist), rating);
+    return { title, artist, rating, prev: null };
   }
 
   /** 历史总条数 */
@@ -86,6 +159,13 @@ export class Store {
 
   countMessages() {
     return this.db.prepare('SELECT COUNT(*) AS n FROM messages').get().n;
+  }
+
+  /** 清空所有对话消息 */
+  clearMessages() {
+    const before = this.countMessages();
+    this.db.prepare('DELETE FROM messages').run();
+    return before;
   }
 
   // ---------- 画像 (markdown) ----------

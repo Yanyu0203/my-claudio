@@ -19,8 +19,18 @@ import { planNextBlock } from './src/bridge.js';
 import { resolveAll } from './src/resolver.js';
 import { classifyMessage, chatReply } from './src/chat.js';
 import { resolveBrainBin, getBrainFlavor } from './src/brain.js';
+import { bootstrapTaste } from './src/bootstrap.js';
 import { promptAndWriteQQUin } from './scripts/setup-qquin.js';
 import { isPlaceholderUin } from './scripts/_lib/env-helper.js';
+import {
+  isAuthRequired,
+  getAuthReason,
+  onAuthChange,
+  updateCookie,
+  probeCookieAlive,
+  markAuthRequired,
+  resetAuthFailSignals,
+} from './src/qqauth.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -66,13 +76,15 @@ const app = express();
 app.use(express.json());
 app.use(express.static(path.join(__dirname, 'pwa')));
 
-// 简单调试接口
-app.get('/api/health', (_, res) => {
+// 简单调试接口 + 画像是否就绪
+app.get('/api/health', async (_, res) => {
+  const hasTaste = await tasteExists();
   res.json({
     ok: true,
     dataDir: DATA_DIR,
     historyCount: store.countPlays(),
     messageCount: store.countMessages(),
+    hasTaste,
   });
 });
 
@@ -82,6 +94,35 @@ app.get('/api/messages', (_, res) => {
   const rows = store.recentMessages(40);
   res.json({ messages: rows });
 });
+
+// 播放历史（含 rating），供 UI 弹窗展示
+app.get('/api/history', (req, res) => {
+  const n = Math.min(200, Math.max(10, Number(req.query.n) || 50));
+  res.json({ history: store.historyForDisplay(n) });
+});
+
+// 拉当前 uin 的自建歌单（首次配置画像用）
+app.get('/api/playlists', async (_, res) => {
+  try {
+    const list = await qq.getMyPlaylists();
+    res.json({ playlists: list });
+  } catch (e) {
+    console.error('[api/playlists]', e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// 检查 taste.md 是否存在
+async function tasteExists() {
+  try {
+    const fs = await import('node:fs/promises');
+    const p = path.join(DATA_DIR, 'taste.md');
+    const stat = await fs.stat(p);
+    return stat.isFile() && stat.size > 0;
+  } catch {
+    return false;
+  }
+}
 
 const server = http.createServer(app);
 
@@ -136,9 +177,23 @@ function singleSender(ws) {
   };
 }
 
+// QQ cookie 熔断状态变化 → 广播给所有前端
+onAuthChange((evt) => {
+  if (evt.required) {
+    broadcaster.send('qq_auth_required', { reason: evt.reason });
+  } else {
+    broadcaster.send('qq_auth_ok', {});
+  }
+});
+
 wss.on('connection', (ws) => {
   console.log(`[ws] client connected (total=${wss.clients.size})`);
   const solo = singleSender(ws);
+
+  // 已处于 cookie 熔断 → 先通知新连上来的前端
+  if (isAuthRequired()) {
+    solo.send('qq_auth_required', { reason: getAuthReason() });
+  }
 
   // 如果已经有会话在跑 —— 恢复它（不打断播放）
   if (session.currentBlock) {
@@ -194,7 +249,13 @@ wss.on('connection', (ws) => {
 
 // ---------- 核心：生成 + 推送一段 ----------
 let inFlight = false; // 防止并发生成
+let bootstrapRunning = false; // 画像生成中（整个进程共用一把锁）
 let blockSeq = 0;
+
+// 跨 block 的疑似 authFail 滑动窗口（最近 N 个 block，累计 ≥ 阈值时主动 probe）
+const AUTH_WINDOW_SIZE = 2;          // 最近 2 个 block
+const AUTH_FAIL_THRESHOLD = 7;       // 累计 7 个疑似 → probe（比如两个 block 各 3~5 首失败）
+const authFailWindow = [];
 /**
  * @param {*} sender
  * @param {string} userIntent  用户额外要求
@@ -204,6 +265,12 @@ async function generateAndSend(sender, userIntent = '', replace = false) {
   if (inFlight) {
     console.log('[block] 拒绝: 上一段还在编');
     sender.send('dj_say', { text: '上一段还在编，稍等～' });
+    return;
+  }
+  // cookie 熔断中：拒绝调大脑（省 token），只提示前端
+  if (isAuthRequired()) {
+    console.log('[block] 拒绝: QQ cookie 过期熔断中');
+    sender.send('qq_auth_required', { reason: getAuthReason() });
     return;
   }
   inFlight = true;
@@ -250,22 +317,66 @@ async function generateAndSend(sender, userIntent = '', replace = false) {
 
     sender.send('status', { stage: 'resolving', silent });
     const tResolve = Date.now();
-    const { playable, failed } = await resolveAll(qq, plan.play);
+    const { playable, failed, authFailCount } = await resolveAll(qq, plan.play);
+
+    // 跨 block 累计：本 block authFailCount 叠加到上个 block 的余量
+    authFailWindow.push(authFailCount);
+    if (authFailWindow.length > AUTH_WINDOW_SIZE) authFailWindow.shift();
+    const windowSum = authFailWindow.reduce((a, b) => a + b, 0);
+
     console.log(
-      `[block #${seq}] resolve 完成 (${((Date.now() - tResolve) / 1000).toFixed(1)}s): 可播 ${playable.length}/${plan.play.length}${failed.length ? ', 失败: ' + failed.map((f) => f.title).join(', ') : ''}`
+      `[block #${seq}] resolve 完成 (${((Date.now() - tResolve) / 1000).toFixed(1)}s): ` +
+      `可播 ${playable.length}/${plan.play.length}` +
+      (failed.length ? `, 失败: ${failed.map((f) => f.title).join(', ')}` : '') +
+      (authFailCount ? ` [auth-suspect=${authFailCount}, 窗口累计=${windowSum}/${AUTH_FAIL_THRESHOLD}]` : '')
     );
+
+    // 触发 probe 的条件（任一满足）：
+    //   (a) 单个 block 里疑似 authFail 过半（大概率整体失败，需要尽快定性）
+    //   (b) 滑动窗口（最近 N 个 block）累计疑似 authFail ≥ 阈值
+    const blockMajority = plan.play.length > 0 && authFailCount >= Math.ceil(plan.play.length * 0.6);
+    const windowOverflow = windowSum >= AUTH_FAIL_THRESHOLD;
+    if (blockMajority || windowOverflow) {
+      console.warn(
+        `[block #${seq}] ⚠️ 触发 cookie 探测：` +
+        (blockMajority ? `本 block ${authFailCount}/${plan.play.length} 疑似 ` : '') +
+        (windowOverflow ? `窗口累计 ${windowSum} ≥ ${AUTH_FAIL_THRESHOLD}` : '')
+      );
+      const state = await probeCookieAlive({
+        apiBase: process.env.QQMUSIC_API_URL || 'http://127.0.0.1:3300',
+        uin: process.env.QQ_UIN,
+      });
+      console.log(`[qqauth] probe 结果: ${state}`);
+      // 无论什么结果都重置信号和窗口，防止反复 probe
+      resetAuthFailSignals();
+      authFailWindow.length = 0;
+
+      if (state === 'expired') {
+        markAuthRequired('cookie 已过期（probe 确认未登录）');
+        sender.send('qq_auth_required', { reason: 'cookie 已过期' });
+        return;
+      }
+      // ok / unknown → 不熔断，继续走正常流程
+      // 如果 playable 为 0（全废），大概率是本轮大脑挑了一水的 VIP 受限歌 → 给用户提示
+      if (state === 'ok' && !playable.length) {
+        console.log('[qqauth] cookie 验证正常，本轮失败属于 VIP / 版权问题');
+      }
+    }
 
     if (!playable.length) {
       const failedList = failed
         .map((f) => `${f.title} - ${f.artist}`)
         .slice(0, 5)
         .join(' / ');
+      const hasAuthSuspect = failed.some((f) => f.reason === 'auth-suspect');
       console.warn(`[block #${seq}] ❌ 全部失败，退出`);
       sender.send('error', {
         message:
           `大脑选了 ${plan.play.length} 首，QQ 音乐都没找到 ☹️\n` +
           `候选: ${failedList}\n` +
-          `可能：搜歌被风控（稍等 30 秒重试），或大脑推荐了非常冷门的歌`,
+          (hasAuthSuspect
+            ? `可能：这批歌存在 VIP / 版权受限（probe 已确认 cookie 还有效）`
+            : `可能：搜歌被风控（稍等 30 秒重试），或大脑推荐了非常冷门的歌`),
         failed,
       });
       return;
@@ -413,6 +524,120 @@ async function handleClientMessage(msg, sender) {
       break;
     }
 
+    case 'clear_chat': {
+      const n = store.clearMessages();
+      console.log(`[chat] 清空了 ${n} 条历史对话`);
+      sender.send('chat_cleared', { count: n });
+      break;
+    }
+
+    case 'bootstrap_start': {
+      // 画像冷启动（前端首次设置 or 重置画像）
+      // data: { picks: [{tid, name, kind, n?}, ...] }
+      if (bootstrapRunning) {
+        console.log('[bootstrap] 拒绝：已有一个生成任务在跑');
+        sender.send('bootstrap_progress', {
+          stage: 'error',
+          detail: '已经在生成画像中，请等完成',
+        });
+        break;
+      }
+      const picks = Array.isArray(data?.picks) ? data.picks : [];
+      if (!picks.length) {
+        sender.send('bootstrap_progress', { stage: 'error', detail: '没选任何歌单' });
+        break;
+      }
+      bootstrapRunning = true;
+      console.log(`[bootstrap] 开始，${picks.length} 个歌单:`, picks.map((p) => `${p.name}(${p.kind}${p.n ? ':' + p.n : ''})`).join(', '));
+      sender.send('bootstrap_progress', { stage: 'starting', detail: '开始生成画像...', pct: 1 });
+
+      // 异步跑，不阻塞消息 loop；进度通过广播让所有连接（含用户可能开的多个标签）都看到
+      (async () => {
+        try {
+          const result = await bootstrapTaste({
+            qq,
+            dataDir: DATA_DIR,
+            picks,
+            onProgress: (evt) => {
+              broadcaster.send('bootstrap_progress', evt);
+            },
+          });
+          console.log(
+            `[bootstrap] 完成 耗时 ${(result.durationMs / 1000).toFixed(1)}s, ` +
+            `样本 ${result.sampleCount}/${result.uniqueCount}, taste.md ${result.rawLength} 字`
+          );
+          broadcaster.send('bootstrap_done', {
+            tastePath: result.tastePath,
+            durationMs: result.durationMs,
+            uniqueCount: result.uniqueCount,
+          });
+          // 画像变了：扔掉当前会话的 block（如果有），让下次重新编
+          // 当前正在播的这首可以让它播完，下一段自动用新画像
+          if (session.nextBlock) {
+            console.log('[bootstrap] 画像变了，扔掉 prefetch 的 nextBlock');
+            session.nextBlock = null;
+          }
+        } catch (e) {
+          console.error('[bootstrap] 失败', e);
+          broadcaster.send('bootstrap_progress', {
+            stage: 'error',
+            detail: e.message,
+          });
+        } finally {
+          bootstrapRunning = false;
+        }
+      })();
+      break;
+    }
+
+    case 'rate_song': {
+      // 用户对某首历史歌打分（喜欢 / 不感兴趣）
+      // 静默累加到 taste-deltas.md，不走对话通道（UI 上也不出气泡）
+      const id = Number(data?.id);
+      const rating = data?.rating === 'like' || data?.rating === 'dislike' ? data.rating : null;
+      const result = store.rateSong(id, rating);
+      if (!result) {
+        console.warn(`[rate] 无效: id=${id}, rating=${rating}`);
+        sender.send('rate_result', { id, ok: false });
+        break;
+      }
+      // 只有"新评/改评"才追加 delta（避免重复取消又打 like 时写一堆）
+      if (rating && rating !== result.prev) {
+        const verb = rating === 'like' ? '喜欢' : '不感兴趣';
+        const deltaText = `${verb}：${result.title} - ${result.artist}`;
+        await store.appendTasteDelta(deltaText, 'rating');
+        console.log(`[rate] ${deltaText} → taste-deltas`);
+      } else if (rating === null && result.prev) {
+        console.log(`[rate] 取消 ${result.prev}: ${result.title} - ${result.artist}（不回写 delta）`);
+      }
+      sender.send('rate_result', { id, ok: true, rating });
+      break;
+    }
+
+    case 'rate_current': {
+      // 给"当前正在播的这首"打分（前端不知道 play_history id，按 title+artist 找）
+      const title = String(data?.title || '').trim();
+      const artist = String(data?.artist || '').trim();
+      const rating = data?.rating === 'like' || data?.rating === 'dislike' ? data.rating : null;
+      if (!title || !artist) {
+        console.warn('[rate_current] title/artist 缺');
+        break;
+      }
+      const result = store.rateByTitleArtist(title, artist, rating);
+      if (!result) break;
+      if (rating && rating !== result.prev) {
+        const verb = rating === 'like' ? '喜欢' : '不感兴趣';
+        const deltaText = `${verb}：${title} - ${artist}`;
+        await store.appendTasteDelta(deltaText, 'rating');
+        console.log(`[rate_current] ${deltaText} → taste-deltas`);
+      } else if (rating === null && result.prev) {
+        console.log(`[rate_current] 取消 ${result.prev}: ${title} - ${artist}`);
+      }
+      // 把结果回推（前端可用来同步 UI 状态，比如多标签页）
+      sender.send('current_rating', { title, artist, rating });
+      break;
+    }
+
     case 'chat': {
       const text = String(data?.text || '').trim();
       if (!text) break;
@@ -475,13 +700,42 @@ async function handleClientMessage(msg, sender) {
 
       // 3. 是否需要重排下一段
       if (r.should_regen) {
-        if (r.replace_now) {
+        // 护栏：即使大脑说 replace_now=true，如果用户消息里没明确"立刻切换"信号，降级为 silent prefetch
+        // 这是为了防止"被切歌"——AI 判断一旦错了就会打断用户正在听的歌
+        const HARD_NOW_SIGNAL = /(立刻|马上|现在就|这首.*跳|这首.*换|换掉这首|切掉)/;
+        let replaceNow = !!r.replace_now;
+        if (replaceNow && !HARD_NOW_SIGNAL.test(text)) {
+          console.log('[chat] ⚠️ 大脑要 replace_now=true 但用户没明确说"立刻"，降级为 prefetch');
+          replaceNow = false;
+        }
+
+        if (replaceNow) {
           console.log('[chat] → 用户明确要立刻换，replace 生成');
           await generateAndSend(sender, r.regen_hint, true);
         } else {
           console.log('[chat] → 静默生成下一段，当前歌不打断');
           await generateAndSend(sender, r.regen_hint, false);
         }
+      }
+      break;
+    }
+
+    case 'qq_cookie_update': {
+      // 用户从弹窗里粘了新 cookie：落盘 + 推给 QQMusicApi + 验证 + 解除熔断
+      const raw = String(data?.cookie || '');
+      console.log(`[qqauth] 收到 cookie 更新请求，长度=${raw.length}`);
+      const result = await updateCookie({
+        cookieString: raw,
+        dataDir: DATA_DIR,
+        apiBase: process.env.QQMUSIC_API_URL || 'http://127.0.0.1:3300',
+      });
+      sender.send('qq_cookie_update_result', result);
+      if (result.ok) {
+        console.log('[qqauth] cookie 更新成功，可以重新生成 block');
+        authFailWindow.length = 0; // 清掉旧窗口，给新 cookie 一个干净起点
+        // 让前端自行决定要不要立刻触发 request_block
+      } else {
+        console.warn('[qqauth] cookie 更新失败:', result.error);
       }
       break;
     }
