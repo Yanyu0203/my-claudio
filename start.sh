@@ -10,11 +10,42 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")" && pwd)"
 cd "$ROOT"
 
-QQ_UIN="${QQ_UIN:-1829981984}"
 QQMUSIC_DIR="$ROOT/QQMusicApi"
 VOX_DIR="$ROOT/vox"
 LOG_DIR="$ROOT/logs"
 COOKIE_FILE="$ROOT/data/qq_cookie.json"
+
+# ---------- 读 QQ_UIN：优先 env 变量 > vox/.env > 占位 ----------
+# 真实的 QQ 号只会存在 vox/.env（已被 .gitignore），脚本里不写死任何个人信息
+if [ -z "${QQ_UIN:-}" ] && [ -f "$VOX_DIR/.env" ]; then
+  QQ_UIN=$(grep -E '^QQ_UIN=' "$VOX_DIR/.env" | tail -1 | cut -d= -f2- | tr -d '"' | tr -d "'" | xargs)
+fi
+QQ_UIN="${QQ_UIN:-}"
+
+# 如果 QQ_UIN 仍空/占位 → 引导用户现在就填（否则 QQMusicApi 的 globalCookie 会对不上）
+case "$QQ_UIN" in
+  ''|123456789|1234567890|YOUR_QQ|your_qq)
+    echo ""
+    echo "[vox] ⚠️  没检测到真实 QQ_UIN"
+    echo "[vox]    现在帮你填一下（需要你的 QQ 号，不用密码）"
+    echo ""
+    (cd "$VOX_DIR" && [ -d node_modules ] || npm install --silent)
+    (cd "$VOX_DIR" && node scripts/setup-qquin.js) || {
+      echo "❌ setup:qquin 失败，请手动编辑 $VOX_DIR/.env 添加 QQ_UIN=你的QQ号"
+      exit 1
+    }
+    # 重新读
+    QQ_UIN=$(grep -E '^QQ_UIN=' "$VOX_DIR/.env" | tail -1 | cut -d= -f2- | tr -d '"' | tr -d "'" | xargs)
+    case "$QQ_UIN" in
+      ''|123456789|1234567890|YOUR_QQ|your_qq)
+        echo "❌ QQ_UIN 仍未填，退出"
+        exit 1
+        ;;
+    esac
+    echo "[vox] ✅ QQ_UIN 已保存到 $VOX_DIR/.env"
+    echo ""
+    ;;
+esac
 
 mkdir -p "$LOG_DIR"
 

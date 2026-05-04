@@ -74,7 +74,7 @@ import { createQQMusic } from './src/qqmusic.js';
 
 const qq = createQQMusic({
   apiBase: 'http://localhost:3300',
-  uin: '1829981984',
+  uin: process.env.QQ_UIN, // 或写死你自己的 QQ 号
 });
 
 // 搜歌

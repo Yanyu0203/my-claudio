@@ -17,7 +17,43 @@ $QQMusicDir = Join-Path $Root "QQMusicApi"
 $VoxDir = Join-Path $Root "vox"
 $LogDir = Join-Path $Root "logs"
 $CookieFile = Join-Path $Root "data\qq_cookie.json"
-$QQUin = if ($env:QQ_UIN) { $env:QQ_UIN } else { "1829981984" }
+
+# ---------- 读 QQ_UIN：优先 env 变量 > vox/.env > 占位 ----------
+# 真实的 QQ 号只会存在 vox/.env（已被 .gitignore），脚本里不写死任何个人信息
+$QQUin = $env:QQ_UIN
+if ([string]::IsNullOrEmpty($QQUin)) {
+    $envFile = Join-Path $VoxDir ".env"
+    if (Test-Path $envFile) {
+        $line = (Get-Content $envFile | Where-Object { $_ -match '^QQ_UIN=' } | Select-Object -Last 1)
+        if ($line) { $QQUin = ($line -replace '^QQ_UIN=', '').Trim('"',"'", ' ') }
+    }
+}
+
+# 空 / 占位符 → 引导用户现在填一下
+$placeholders = @('', '123456789', '1234567890', 'YOUR_QQ', 'your_qq')
+if ($placeholders -contains $QQUin) {
+    Write-Host ""
+    Write-Host "[vox] ⚠️  没检测到真实 QQ_UIN" -ForegroundColor Yellow
+    Write-Host "[vox]    现在帮你填一下（只要 QQ 号，不要密码）"
+    Write-Host ""
+    if (-not (Test-Path (Join-Path $VoxDir "node_modules"))) {
+        Push-Location $VoxDir; npm install --silent; Pop-Location
+    }
+    Push-Location $VoxDir
+    try { node scripts/setup-qquin.js } finally { Pop-Location }
+    # 重新读
+    $envFile = Join-Path $VoxDir ".env"
+    if (Test-Path $envFile) {
+        $line = (Get-Content $envFile | Where-Object { $_ -match '^QQ_UIN=' } | Select-Object -Last 1)
+        if ($line) { $QQUin = ($line -replace '^QQ_UIN=', '').Trim('"',"'", ' ') }
+    }
+    if ($placeholders -contains $QQUin) {
+        Write-Host "❌ QQ_UIN 仍未填，退出" -ForegroundColor Red
+        exit 1
+    }
+    Write-Host "[vox] ✅ QQ_UIN 已保存到 $VoxDir\.env" -ForegroundColor Green
+    Write-Host ""
+}
 
 New-Item -ItemType Directory -Force -Path $LogDir | Out-Null
 

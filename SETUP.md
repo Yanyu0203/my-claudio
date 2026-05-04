@@ -153,32 +153,35 @@ npm install
 
 ### 3.3 启动 QQMusicApi（带你的 QQ 号）
 
-⚠️ **要把 `1829981984` 换成你自己的 QQ 号**。
+⚠️ **下面的 `YOUR_QQ` 要替换成你自己的 QQ 号**（纯数字，比如 `123456789`）。
 
 #### macOS
 
 ```bash
-QQ=1829981984 yarn start
+QQ=YOUR_QQ yarn start
 # 或直接用 npm
-QQ=1829981984 node ./bin/www
+QQ=YOUR_QQ node ./bin/www
 ```
 
 #### Windows
 
 ```powershell
-$env:QQ="1829981984"; yarn start
+$env:QQ="YOUR_QQ"; yarn start
 # 或
-$env:QQ="1829981984"; node ./bin/www
+$env:QQ="YOUR_QQ"; node ./bin/www
 ```
 
-看到下面这行就成功了，**保持这个终端窗口开着**：
+看到下面这行就成功了（`YOUR_QQ` 会变成你填的真实号码），**保持这个终端窗口开着**：
 
 ```
 Listening on
  http://localhost:3300
  http://127.0.0.1:3300
-配置QQ号/wxuin 为：1829981984
+配置QQ号/wxuin 为：YOUR_QQ
 ```
+
+> 💡 **其实你可以直接用一键脚本**：回到项目根跑 `./start.sh`（macOS）或 `.\start.ps1`（Windows），
+> 第一次会交互式问你 QQ 号，保存到 `vox/.env` 里（已被 `.gitignore`），之后就不用每次传了。
 
 ### 3.4 从浏览器复制 cookie（必须人做 ⚠️）
 
