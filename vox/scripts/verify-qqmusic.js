@@ -1,5 +1,5 @@
 /**
- * 验证 qqmusic.js 客户端是否打通
+ * 验证音乐 provider 是否打通
  *
  * 用法:
  *   cd vox
@@ -9,12 +9,15 @@
  */
 
 import 'dotenv/config';
-import { createQQMusic } from '../src/qqmusic.js';
+import { createProvider } from '../src/music/index.js';
 
-const qq = createQQMusic({
+const PROVIDER = process.env.MUSIC_PROVIDER || 'qq';
+const music = createProvider(PROVIDER, {
   apiBase: process.env.QQMUSIC_API_URL,
-  uin: process.env.QQ_UIN,
+  userId: process.env.QQ_UIN,
 });
+
+console.log(`\n[verify] music provider = ${music.kind}\n`);
 
 const line = (t) => console.log('\n========== ' + t + ' ==========');
 const ok = (m) => console.log('  ✅ ' + m);
@@ -25,14 +28,14 @@ async function main() {
   line('1. 搜歌：晴天 周杰伦');
   let searchHits = [];
   try {
-    searchHits = await qq.search('晴天 周杰伦', 3);
+    searchHits = await music.search('晴天 周杰伦', 3);
     if (!searchHits.length) {
       fail('搜歌返回空');
     } else {
       ok(`命中 ${searchHits.length} 条`);
       searchHits.forEach((s, i) => {
         console.log(
-          `     ${i + 1}. ${s.title} - ${s.artist}  [${s.album}]  mid=${s.songmid}`
+          `     ${i + 1}. ${s.title} - ${s.artist}  [${s.album}]  id=${s.songId}`
         );
       });
     }
@@ -48,7 +51,7 @@ async function main() {
     let any = false;
     for (const s of searchHits) {
       try {
-        const { url } = await qq.getPlayUrl(s.songmid);
+        const { url } = await music.getPlayUrl(s.songId);
         if (url) {
           ok(`【${s.title}】可播：${url.slice(0, 90)}...`);
           any = true;
@@ -64,17 +67,18 @@ async function main() {
   }
 
   // ---------- 3. 拉我的歌单 ----------
-  line(`3. 拉我的歌单 (uin=${process.env.QQ_UIN})`);
+  line(`3. 拉我的歌单 (userId=${process.env.QQ_UIN})`);
   let firstPlaylist = null;
   try {
-    const list = await qq.getMyPlaylists();
+    const list = await music.getMyPlaylists();
     if (!list.length) {
-      fail('没拉到任何歌单（确认 cookie 已 setCookie 过 + uin 正确）');
+      fail('没拉到任何歌单（确认 cookie 已 setCookie 过 + userId 正确）');
     } else {
       ok(`拿到 ${list.length} 个歌单：`);
       list.slice(0, 8).forEach((p, i) => {
+        const fav = p.isFavorite ? ' ♥' : '';
         console.log(
-          `     ${i + 1}. ${p.name}  (${p.songCount} 首)  tid=${p.tid}`
+          `     ${i + 1}. ${p.name}${fav}  (${p.songCount} 首)  id=${p.playlistId}`
         );
       });
       if (list.length > 8) console.log(`     ... 还有 ${list.length - 8} 个`);
@@ -90,7 +94,7 @@ async function main() {
     fail('上一步没拿到歌单，跳过');
   } else {
     try {
-      const detail = await qq.getPlaylistSongs(firstPlaylist.tid);
+      const detail = await music.getPlaylistSongs(firstPlaylist.playlistId);
       ok(`歌单 [${detail.name}] 共 ${detail.total} 首，前 5 首：`);
       detail.songs.slice(0, 5).forEach((s, i) => {
         console.log(`     ${i + 1}. ${s.title} - ${s.artist}`);

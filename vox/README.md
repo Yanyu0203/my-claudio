@@ -67,32 +67,35 @@ npm run verify:qq
 
 ---
 
-## qqmusic.js 对外 API
+## 音乐 provider 对外 API
 
 ```js
-import { createQQMusic } from './src/qqmusic.js';
+import { createProvider } from './src/music/index.js';
 
-const qq = createQQMusic({
-  apiBase: 'http://localhost:3300',
-  uin: process.env.QQ_UIN, // 或写死你自己的 QQ 号
+// 选择音乐源：'qq' | 'netease'（后续支持）
+const music = createProvider(process.env.MUSIC_PROVIDER || 'qq', {
+  apiBase: 'http://localhost:3300',      // 仅 qq 需要
+  userId: process.env.QQ_UIN,            // qq 传 QQ 号；netease 传用户 id
 });
 
 // 搜歌
-const songs = await qq.search('晴天 周杰伦', 5);
-// → [{ songmid, title, artist, album, duration }]
+const songs = await music.search('晴天 周杰伦', 5);
+// → [{ songId, title, artist, album, cover, duration }]
 
 // 拿 mp3 直链
-const { url, authFail } = await qq.getPlayUrl('003OUlho2HcRHC');
-// authFail=true 表示 QQ cookie 过期（路 A 返回 result=400）
+const { url, authFail } = await music.getPlayUrl(songs[0].songId);
+// authFail=true 表示 cookie 过期
 
 // 拉我的所有歌单
-const playlists = await qq.getMyPlaylists();
-// → [{ tid, name, cover, songCount, dirid }]
+const playlists = await music.getMyPlaylists();
+// → [{ playlistId, name, cover, songCount, isFavorite }]
 
 // 拉单个歌单详情
-const detail = await qq.getPlaylistSongs(9542894997);
+const detail = await music.getPlaylistSongs(playlists[0].playlistId);
 // → { name, total, songs: [...] }
 ```
+
+字段命名是**跨 provider 统一的中性字段**，各 provider 内部自己映射原生字段（QQ 的 songmid、Netease 的 id 都映射成 songId）。
 
 ---
 

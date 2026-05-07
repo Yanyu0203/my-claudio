@@ -11,7 +11,7 @@ import { fileURLToPath } from 'node:url';
 import express from 'express';
 import { WebSocketServer } from 'ws';
 
-import { createQQMusic } from './src/qqmusic.js';
+import { createProvider } from './src/music/index.js';
 import { Store } from './src/state.js';
 import { getDB, purgeExpiredCache } from './src/db.js';
 import { getWeather } from './src/weather.js';
@@ -64,10 +64,13 @@ if (isPlaceholderUin(process.env.QQ_UIN)) {
 }
 
 // ---------- 初始化各模块 ----------
-const qq = createQQMusic({
+// 选择音乐源：默认 qq，未来可通过 MUSIC_PROVIDER 切换到 netease
+const MUSIC_PROVIDER = process.env.MUSIC_PROVIDER || 'qq';
+const music = createProvider(MUSIC_PROVIDER, {
   apiBase: process.env.QQMUSIC_API_URL || 'http://127.0.0.1:3300',
-  uin: process.env.QQ_UIN,
+  userId: process.env.QQ_UIN,
 });
+console.log(`[music] provider = ${music.kind}`);
 
 // 初始化 DB（单例），并清理过期缓存
 getDB(DATA_DIR);
@@ -109,7 +112,7 @@ app.get('/api/history', (req, res) => {
 // 拉当前 uin 的自建歌单（首次配置画像用）
 app.get('/api/playlists', async (_, res) => {
   try {
-    const list = await qq.getMyPlaylists();
+    const list = await music.getMyPlaylists();
     res.json({ playlists: list });
   } catch (e) {
     console.error('[api/playlists]', e);
@@ -275,20 +278,20 @@ async function ensureUrlAsync(block, idx) {
   if (idx < 0 || idx >= block.songs.length) return;
   const song = block.songs[idx];
   if (!song || song.url) return; // 已经有 url，跳过
-  if (!song.songmid) return;     // meta 都没有的不管
+  if (!song.songId) return;      // meta 都没有的不管
 
   const key = `${block.startedAt || '?'}-${idx}`;
   if (inflightUrlFetches.has(key)) return;
   inflightUrlFetches.add(key);
 
   try {
-    const { url, authFail } = await fetchUrlFor(qq, song);
+    const { url, authFail } = await fetchUrlFor(music, song);
     if (url) {
       song.url = url; // 就地改 session 里的 song
       // 广播给所有前端（多标签同步）
       broadcaster.send('song_url_ready', {
         idx,
-        songmid: song.songmid,
+        songId: song.songId,
         url,
       });
       console.log(`[lazy-url] idx=${idx} ${song.title} → 拿到直链`);
@@ -296,7 +299,7 @@ async function ensureUrlAsync(block, idx) {
       // 拿不到：通知前端，前端会跳到下一首
       broadcaster.send('song_url_failed', {
         idx,
-        songmid: song.songmid,
+        songId: song.songId,
         reason: authFail ? 'auth' : 'no-url',
       });
       console.warn(`[lazy-url] idx=${idx} ${song.title} → 拿不到直链${authFail ? '(authFail)' : ''}`);
@@ -371,7 +374,7 @@ async function generateAndSend(sender, userIntent = '', replace = false) {
     const tResolve = Date.now();
 
     // 阶段 A：只搜 meta（不拿 mp3 直链）。这一步快，10 首歌大概 10-15 秒
-    const { resolved, failed } = await searchAll(qq, plan.play);
+    const { resolved, failed } = await searchAll(music, plan.play);
     console.log(
       `[block #${seq}] search 完成 (${((Date.now() - tResolve) / 1000).toFixed(1)}s): ` +
       `搜到 ${resolved.length}/${plan.play.length}` +
@@ -397,9 +400,9 @@ async function generateAndSend(sender, userIntent = '', replace = false) {
     // 阶段 B：预热前 N 首的 mp3 直链（保证点 PLAY 就能响）
     // 其余歌等播到时再懒加载（触发 ensure_url）
     const tPrefetch = Date.now();
-    const { authFailCount } = await prefetchUrls(qq, resolved, PREFETCH_URLS);
+    const { authFailCount } = await prefetchUrls(music, resolved, PREFETCH_URLS);
 
-    // 过滤出真能播的（有 url 的 + songmid 有的但 url 还没拿的先都算能播，等懒加载）
+    // 过滤出真能播的（有 url 的 + songId 有的但 url 还没拿的先都算能播，等懒加载）
     // 前面预热失败的那几个（如果 url=''），就是没拿到直链，从能播列表移除
     const playable = resolved.filter((s, i) => {
       if (i < PREFETCH_URLS) {
@@ -653,7 +656,7 @@ async function handleClientMessage(msg, sender) {
 
     case 'bootstrap_start': {
       // 画像冷启动（前端首次设置 or 重置画像）
-      // data: { picks: [{tid, name, kind, n?}, ...] }
+      // data: { picks: [{playlistId, name, kind, n?}, ...] }
       if (bootstrapRunning) {
         console.log('[bootstrap] 拒绝：已有一个生成任务在跑');
         sender.send('bootstrap_progress', {
@@ -675,7 +678,7 @@ async function handleClientMessage(msg, sender) {
       (async () => {
         try {
           const result = await bootstrapTaste({
-            qq,
+            music,
             dataDir: DATA_DIR,
             picks,
             onProgress: (evt) => {

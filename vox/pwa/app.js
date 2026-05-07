@@ -349,7 +349,7 @@ function handleHello(data) {
       // 懒加载：server 恢复过来时这首 url 还没就绪，等 song_url_ready
       console.log('[hello] current.url 空，请求 ensure_url');
       setStatus('LOADING // ' + current.title);
-      const waitingSongmid = current.songmid;
+      const waitingSongId = current.songId;
       send('ensure_url', { idx });
       renderQueue();
       document.title = `⏳ ${current.title} — ${current.artist} // VOX`;
@@ -358,7 +358,7 @@ function handleHello(data) {
       if (lazyUrlTimer) clearTimeout(lazyUrlTimer);
       lazyUrlTimer = setTimeout(() => {
         lazyUrlTimer = null;
-        if (current && !current.url && current.songmid === waitingSongmid) {
+        if (current && !current.url && current.songId === waitingSongId) {
           console.warn('[hello] 等 lazy-url 超时，跳过');
           current = null;
           playNext();
@@ -509,7 +509,7 @@ function playNext() {
     try { audio.removeAttribute('src'); audio.load(); } catch {}
 
     const idx = (window.__currentBlockSongs || 1) - queue.length - 1;
-    const waitingSongmid = current.songmid;
+    const waitingSongId = current.songId;
     send('ensure_url', { idx: Math.max(0, idx) });
     renderCurrentSong();
     renderQueue();
@@ -520,7 +520,7 @@ function playNext() {
     // 兜底超时：8s 内没拿到 url → 跳下一首
     lazyUrlTimer = setTimeout(() => {
       lazyUrlTimer = null;
-      if (current && !current.url && current.songmid === waitingSongmid) {
+      if (current && !current.url && current.songId === waitingSongId) {
         console.warn(`[play] 等 lazy-url 超时（8s），跳过 "${current.title}"`);
         pushSysLog(`"${current.title}" 拿不到直链，跳过`);
         current = null; // 防止后续 played 误报
@@ -860,7 +860,7 @@ function fmtRelTime(iso) {
 // 画像冷启动 Modal（首次配置 / 重置画像）
 // ============================================================
 let playlistCache = []; // 拉到的歌单列表
-let playlistPicks = {}; // { [tid]: {kind, n} }  用户的选择
+let playlistPicks = {}; // { [playlistId]: {kind, n} }  用户的选择
 
 resetTasteBtn.addEventListener('click', () => openBootstrapModal(true));
 bootstrapClose.addEventListener('click', closeBootstrapModal);
@@ -905,10 +905,10 @@ function renderPlaylistPicker() {
     // 默认猜一个合理的策略：<=200 首 → all，否则 → random 100
     const suggested = p.songCount <= 200 ? { kind: 'all' } : { kind: 'random', n: 100 };
     return `
-      <div class="bs-item" data-tid="${p.tid}">
+      <div class="bs-item" data-pid="${p.playlistId}">
         <div class="chk" data-action="toggle"></div>
         <div class="pl-info">
-          <div class="pl-name">${esc(p.name)}</div>
+          <div class="pl-name">${esc(p.name)}${p.isFavorite ? ' ♥' : ''}</div>
           <div class="pl-meta">${p.songCount} 首</div>
         </div>
         <div class="pl-strategy">
@@ -925,34 +925,34 @@ function renderPlaylistPicker() {
 
   // 事件委托
   bootstrapPlaylists.querySelectorAll('.bs-item').forEach((row) => {
-    const tid = Number(row.dataset.tid);
+    const pid = row.dataset.pid; // 字符串 id，netease 可能是大数
     const chk = row.querySelector('.chk');
     const kindSel = row.querySelector('select');
     const nInput = row.querySelector('input');
 
     chk.addEventListener('click', () => {
-      if (playlistPicks[tid]) {
-        delete playlistPicks[tid];
+      if (playlistPicks[pid]) {
+        delete playlistPicks[pid];
       } else {
-        playlistPicks[tid] = { kind: kindSel.value, n: Number(nInput.value) || 100 };
+        playlistPicks[pid] = { kind: kindSel.value, n: Number(nInput.value) || 100 };
       }
-      row.classList.toggle('picked', !!playlistPicks[tid]);
-      chk.classList.toggle('on', !!playlistPicks[tid]);
+      row.classList.toggle('picked', !!playlistPicks[pid]);
+      chk.classList.toggle('on', !!playlistPicks[pid]);
       refreshPickStats();
     });
 
     kindSel.addEventListener('change', () => {
       const kind = kindSel.value;
       nInput.disabled = kind === 'all';
-      if (playlistPicks[tid]) {
-        playlistPicks[tid].kind = kind;
-        playlistPicks[tid].n = Number(nInput.value) || 100;
+      if (playlistPicks[pid]) {
+        playlistPicks[pid].kind = kind;
+        playlistPicks[pid].n = Number(nInput.value) || 100;
         refreshPickStats();
       }
     });
     nInput.addEventListener('input', () => {
-      if (playlistPicks[tid]) {
-        playlistPicks[tid].n = Number(nInput.value) || 100;
+      if (playlistPicks[pid]) {
+        playlistPicks[pid].n = Number(nInput.value) || 100;
         refreshPickStats();
       }
     });
@@ -970,8 +970,8 @@ function refreshPickStats() {
   }
   // 估算抽出的歌数
   let est = 0;
-  picked.forEach(([tid, cfg]) => {
-    const p = playlistCache.find((x) => String(x.tid) === String(tid));
+  picked.forEach(([pid, cfg]) => {
+    const p = playlistCache.find((x) => String(x.playlistId) === String(pid));
     if (!p) return;
     if (cfg.kind === 'all') est += p.songCount;
     else est += Math.min(p.songCount, cfg.n || 100);
@@ -985,10 +985,10 @@ function refreshPickStats() {
 }
 
 function onBootstrapSubmit() {
-  const picks = Object.entries(playlistPicks).map(([tid, cfg]) => {
-    const p = playlistCache.find((x) => String(x.tid) === String(tid));
+  const picks = Object.entries(playlistPicks).map(([pid, cfg]) => {
+    const p = playlistCache.find((x) => String(x.playlistId) === String(pid));
     return {
-      tid: p.tid,
+      playlistId: p.playlistId,
       name: p.name,
       kind: cfg.kind,
       n: cfg.kind === 'all' ? undefined : (cfg.n || 100),
@@ -1605,10 +1605,10 @@ setupQQAuthUI();
 // ============================================================
 // 懒加载 mp3 直链：server 拿到后广播，前端对号入座
 // ============================================================
-function handleSongUrlReady({ songmid, url }) {
+function handleSongUrlReady({ songId, url }) {
   if (!url) return;
-  // 1) 如果就是当前正在等的歌（current.url 空、songmid 对上）→ 立刻启播
-  if (current && !current.url && current.songmid === songmid) {
+  // 1) 如果就是当前正在等的歌（current.url 空、songId 对上）→ 立刻启播
+  if (current && !current.url && current.songId === songId) {
     console.log(`[lazy-url] ✓ current 拿到直链，启播: ${current.title}`);
     if (lazyUrlTimer) { clearTimeout(lazyUrlTimer); lazyUrlTimer = null; }
     current.url = url;
@@ -1627,17 +1627,17 @@ function handleSongUrlReady({ songmid, url }) {
     return;
   }
   // 2) 队列里对应那首 → 填 url（播到时就不用等了）
-  const target = queue.find((s) => s.songmid === songmid);
+  const target = queue.find((s) => s.songId === songId);
   if (target && !target.url) {
     target.url = url;
     console.log(`[lazy-url] queue 里 "${target.title}" 更新 url`);
   }
 }
 
-function handleSongUrlFailed({ idx, songmid, reason }) {
-  console.warn(`[lazy-url] 失败 idx=${idx} songmid=${songmid} reason=${reason}`);
+function handleSongUrlFailed({ idx, songId, reason }) {
+  console.warn(`[lazy-url] 失败 idx=${idx} songId=${songId} reason=${reason}`);
   // 如果是当前正在等的歌 → 直接跳下一首
-  if (current && !current.url && current.songmid === songmid) {
+  if (current && !current.url && current.songId === songId) {
     if (lazyUrlTimer) { clearTimeout(lazyUrlTimer); lazyUrlTimer = null; }
     setStatus('SKIP // 直链拿不到');
     pushSysLog(`"${current.title}" 拿不到直链（${reason === 'auth' ? 'cookie 问题' : 'VIP/版权'}），跳过`);
@@ -1647,9 +1647,9 @@ function handleSongUrlFailed({ idx, songmid, reason }) {
   }
   // 队列里那首 → 从队列移除（避免将来播到还等半天）
   const before = queue.length;
-  queue = queue.filter((s) => s.songmid !== songmid);
+  queue = queue.filter((s) => s.songId !== songId);
   if (queue.length < before) {
-    console.log(`[lazy-url] 从队列移除 songmid=${songmid}`);
+    console.log(`[lazy-url] 从队列移除 songId=${songId}`);
     renderQueue();
   }
 }

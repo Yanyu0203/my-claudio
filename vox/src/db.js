@@ -63,7 +63,7 @@ function initSchema(db) {
     CREATE INDEX IF NOT EXISTS idx_msg_ts ON messages(ts DESC);
 
     -- 歌曲缓存 (4 小时) ------------------------------------------------------
-    -- key 格式: 'search:title|artist'   值: JSON {songmid, url, cover, ...}
+    -- key 格式: 'title|artist'   值: JSON {songId, url, cover, ...}
     CREATE TABLE IF NOT EXISTS song_cache (
       key         TEXT PRIMARY KEY,
       value_json  TEXT NOT NULL,
@@ -79,7 +79,7 @@ function initSchema(db) {
     );
     CREATE INDEX IF NOT EXISTS idx_song_miss_exp ON song_cache_miss(expires_at);
 
-    -- 歌曲 meta 缓存 (4 小时) — 只有 search 结果（songmid/cover/duration），没 mp3 直链
+    -- 歌曲 meta 缓存 (4 小时) — 只有 search 结果（songId/cover/duration），没 mp3 直链
     -- 懒加载 url 时用：搜过但还没播的歌暂存在这里，播到时再拿 url 升级成 song_cache
     CREATE TABLE IF NOT EXISTS song_cache_meta (
       key         TEXT PRIMARY KEY,

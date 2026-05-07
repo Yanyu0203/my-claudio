@@ -1,17 +1,19 @@
 /**
- * QQ 音乐统一客户端
+ * QQ 音乐 provider
  * --------------------------------------------------
- * 对外暴露 4 个方法，给 Vox 其它模块用：
- *   - search(keyword, n)        搜歌
- *   - getPlayUrl(songmid)       拿 mp3 直链（返回 {url, authFail}）
- *   - getMyPlaylists(uin)       拉某个用户的所有歌单
- *   - getPlaylistSongs(tid)     拉单个歌单的所有歌
+ * 实现 MusicProvider 接口（见 ./index.js 的 JSDoc）
  *
  * 内部分两路：
  *   - 搜歌：直连腾讯 musicu.fcg 新接口（jsososo 老接口已被腾讯下线）
  *   - 取直链 / 拉歌单：走本地 QQMusicApi（cookie 已托管在那边）
+ *
+ * 字段映射（QQ 原生 → 通用）：
+ *   songmid  → songId
+ *   tid      → playlistId
+ *   dirid=201 → isFavorite=true
+ *   uin      → userId
  */
-import { reportAuthFailSignal, resetAuthFailSignals } from './qqauth.js';
+import { reportAuthFailSignal, resetAuthFailSignals } from '../qqauth.js';
 
 const DEFAULT_API_BASE = 'http://localhost:3300';
 const TENCENT_MUSICU = 'https://u.y.qq.com/cgi-bin/musicu.fcg';
@@ -35,7 +37,7 @@ async function throttleBeforeSearch() {
   // 1) 处在冷却窗口里 → 等到窗口结束
   if (now < _cooldownUntil) {
     const wait = _cooldownUntil - now;
-    console.warn(`[qqmusic] 仍在冷却中，等 ${wait}ms`);
+    console.warn(`[qq] 仍在冷却中，等 ${wait}ms`);
     await sleep(wait);
   }
 
@@ -50,19 +52,20 @@ async function throttleBeforeSearch() {
 function triggerCooldown(reason) {
   _cooldownUntil = Date.now() + COOLDOWN_AFTER_BLOCK_MS;
   console.warn(
-    `[qqmusic] 触发风控（${reason}），进入 ${COOLDOWN_AFTER_BLOCK_MS / 1000}s 冷却`
+    `[qq] 触发风控（${reason}），进入 ${COOLDOWN_AFTER_BLOCK_MS / 1000}s 冷却`
   );
 }
 
 /**
- * 创建一个 QQ 音乐客户端
+ * 创建一个 QQ 音乐 provider
  * @param {object} opts
  * @param {string} [opts.apiBase] 本地 QQMusicApi 地址
- * @param {string} [opts.uin]     默认 QQ 号（拉歌单时用）
+ * @param {string} [opts.userId]  默认用户 ID（QQ 号，拉歌单时用）
+ * @returns {import('./index.js').MusicProvider}
  */
-export function createQQMusic(opts = {}) {
+export function createQQProvider(opts = {}) {
   const apiBase = (opts.apiBase || DEFAULT_API_BASE).replace(/\/$/, '');
-  const defaultUin = opts.uin || '';
+  const defaultUserId = opts.userId || opts.uin || '';
 
   // ---------- 内部工具 ----------
   async function callLocal(path, params = {}) {
@@ -88,17 +91,11 @@ export function createQQMusic(opts = {}) {
   }
 
   // ---------- 搜歌：腾讯新接口 ----------
-  /**
-   * @param {string} keyword 搜索关键词
-   * @param {number} [n=5]   返回多少条
-   * @returns {Promise<Array<{songmid:string,title:string,artist:string,album:string,duration:number}>>}
-   */
   async function search(keyword, n = 5) {
     if (!keyword || !keyword.trim()) return [];
-
     // 全局串行：前一条 search 没 return 前不发下一条，避免并发打爆风控
     const task = _searchChain.then(() => _doSearch(keyword, n));
-    _searchChain = task.catch(() => {}); // 链上异常不阻塞后续
+    _searchChain = task.catch(() => {});
     return task;
   }
 
@@ -155,39 +152,35 @@ export function createQQMusic(opts = {}) {
 
       if (list.length > 0) {
         const out = list.map((s) => ({
-          songmid: s.mid,
+          songId: s.mid,
           title: s.title || s.name,
           artist: (s.singer || []).map((x) => x.name).join('/'),
           album: s.album?.name || '',
-          albummid: s.album?.mid || '',
           cover: s.album?.mid
             ? `https://y.gtimg.cn/music/photo_new/T002R500x500M000${s.album.mid}.jpg`
             : '',
           duration: s.interval || 0,
         }));
-        console.log(`[qqmusic] search "${keyword}" → ${out.length} hits`);
+        console.log(`[qq] search "${keyword}" → ${out.length} hits`);
         return out;
       }
       // 空结果 + code != 0 → 风控，进入冷却并退避
       if (r1.code !== 0) {
         triggerCooldown(`code=${r1.code}`);
         if (attempt < MAX_RETRY - 1) {
-          // 风控后退避更激进：2s / 5s / ...
           const wait = 2000 * Math.pow(2, attempt);
           console.warn(
-            `[qqmusic] search "${keyword}" code=${r1.code}, 退避 ${wait}ms 重试 [${attempt + 1}/${MAX_RETRY}]`
+            `[qq] search "${keyword}" code=${r1.code}, 退避 ${wait}ms 重试 [${attempt + 1}/${MAX_RETRY}]`
           );
           await sleep(wait);
           continue;
         }
-        // 重试用尽仍风控 → 返回空数组但标记 rateLimited
         const out = [];
         out.rateLimited = true;
-        console.warn(`[qqmusic] search "${keyword}" 风控重试用尽 code=${r1.code}`);
+        console.warn(`[qq] search "${keyword}" 风控重试用尽 code=${r1.code}`);
         return out;
       }
-      // code=0 但确实没结果
-      console.log(`[qqmusic] search "${keyword}" → 0 hits (真空)`);
+      console.log(`[qq] search "${keyword}" → 0 hits (真空)`);
       return [];
     }
     return [];
@@ -195,32 +188,17 @@ export function createQQMusic(opts = {}) {
 
   // ---------- 拿播放直链 ----------
   /**
-   * 双路实现，谁先拿到用谁：
-   *   路 A: 走本地 QQMusicApi /song/url（带它自己 globalCookie，能拿 VIP）
-   *   路 B: 直接打腾讯 musicu.fcg vkey（无 cookie 仅能拿非 VIP）
-   *
-   * @param {string} songmid
-   * @returns {Promise<string>} mp3 直链；拿不到返回空串
-   */
-  /**
-   * 拿播放直链
    * 双路：路 A 本地 QQMusicApi（带 cookie，能拿 VIP） / 路 B 直连腾讯 vkey（兜底）
-   *
-   * @param {string} songmid
-   * @returns {Promise<{url: string, authFail: boolean}>}
-   *   url: mp3 直链，失败返回 ''
-   *   authFail: true = 路A 明确返回了"cookie 过期"的信号（result=400 或 401/403）
-   *             上层可据此聚合后触发全局熔断
    */
-  async function getPlayUrl(songmid) {
-    if (!songmid) return { url: '', authFail: false };
+  async function getPlayUrl(songId) {
+    if (!songId) return { url: '', authFail: false };
 
     let aAuthFail = false;
 
     // ---- 路 A: 本地 QQMusicApi（推荐路径，带登录 cookie） ----
     let aReason = '';
     try {
-      const url = `${apiBase}/song/url?id=${encodeURIComponent(songmid)}`;
+      const url = `${apiBase}/song/url?id=${encodeURIComponent(songId)}`;
       const res = await fetch(url);
       if (!res.ok) {
         aReason = `HTTP ${res.status}`;
@@ -228,12 +206,9 @@ export function createQQMusic(opts = {}) {
       } else {
         const json = await res.json();
         if (typeof json?.data === 'string' && json.data.startsWith('http')) {
-          // 一次成功 → 清零累计信号（说明 cookie 没问题）
           resetAuthFailSignals();
           return { url: json.data, authFail: false };
         }
-        // QQMusicApi 约定 result=400 + "获取播放链接出错" = 疑似 cookie 过期
-        // 但也可能只是这首歌 VIP 限权，不立刻下结论，先记个信号
         if (json?.result === 400) {
           aAuthFail = true;
         }
@@ -242,7 +217,7 @@ export function createQQMusic(opts = {}) {
     } catch (e) {
       aReason = `throw ${e.message}`;
     }
-    console.warn(`[qqmusic] 路A /song/url ${songmid} 失败: ${aReason}${aAuthFail ? ' [auth-suspect]' : ''}`);
+    console.warn(`[qq] 路A /song/url ${songId} 失败: ${aReason}${aAuthFail ? ' [auth-suspect]' : ''}`);
     if (aAuthFail) {
       reportAuthFailSignal();
     }
@@ -250,12 +225,11 @@ export function createQQMusic(opts = {}) {
     // ---- 路 B: 直连腾讯（兜底，不需要本地服务） ----
     let bReason = '';
     try {
-      // step 1: 拿 strMediaMid
       const detailPayload = {
         songinfo: {
           method: 'get_song_detail_yqq',
           module: 'music.pf_song_detail_svr',
-          param: { song_mid: songmid },
+          param: { song_mid: songId },
         },
       };
       const dRes = await fetch(
@@ -267,9 +241,8 @@ export function createQQMusic(opts = {}) {
       } else {
         const dJson = await dRes.json();
         const strMediaMid =
-          dJson?.songinfo?.data?.track_info?.file?.media_mid || songmid;
+          dJson?.songinfo?.data?.track_info?.file?.media_mid || songId;
 
-        // step 2: vkey
         const file = `M500${strMediaMid}.mp3`;
         const guid = String(Math.floor(Math.random() * 9000000000) + 1000000000);
         const vkeyPayload = {
@@ -279,7 +252,7 @@ export function createQQMusic(opts = {}) {
             param: {
               filename: [file],
               guid,
-              songmid: [songmid],
+              songmid: [songId],
               songtype: [0],
               uin: '0',
               loginflag: 1,
@@ -305,8 +278,6 @@ export function createQQMusic(opts = {}) {
           const sipList = vJson?.req_0?.data?.sip || [];
           const sip = sipList.find((s) => !s.startsWith('http://ws')) || sipList[0];
           if (item?.purl && sip) {
-            // 路 B 也能播说明至少非 VIP 通路在 — cookie 还活着的可能性很大
-            // 不过保守起见只清零信号，不下"cookie OK"的结论
             resetAuthFailSignals();
             return { url: sip + item.purl, authFail: false };
           }
@@ -316,46 +287,38 @@ export function createQQMusic(opts = {}) {
     } catch (e) {
       bReason = `throw ${e.message}`;
     }
-    console.warn(`[qqmusic] 路B vkey ${songmid} 失败: ${bReason}`);
+    console.warn(`[qq] 路B vkey ${songId} 失败: ${bReason}`);
 
     return { url: '', authFail: aAuthFail };
   }
 
   // ---------- 拉某用户的所有歌单 ----------
-  /**
-   * @param {string} [uin] 不传用 createQQMusic 时设置的默认 uin
-   * @returns {Promise<Array<{tid:number,name:string,cover:string,songCount:number,dirid:number}>>}
-   */
-  async function getMyPlaylists(uin) {
-    const u = uin || defaultUin;
-    if (!u) throw new Error('getMyPlaylists 需要 uin');
+  async function getMyPlaylists(userId) {
+    const u = userId || defaultUserId;
+    if (!u) throw new Error('getMyPlaylists 需要 userId (QQ 号)');
     const data = await callLocal('/user/songlist', { id: u });
     const list = data?.list || [];
     return list
-      .filter((d) => d.tid && d.song_cnt > 0) // 过滤掉空歌单和占位项
+      .filter((d) => d.tid && d.song_cnt > 0) // 过滤空歌单 + 占位项
       .map((d) => ({
-        tid: d.tid,
+        playlistId: d.tid,
         name: d.diss_name,
         cover: d.diss_cover,
         songCount: d.song_cnt,
-        dirid: d.dirid, // 201=我喜欢
+        isFavorite: d.dirid === 201, // QQ 约定：201 = "我喜欢"
       }));
   }
 
   // ---------- 拉单个歌单的歌 ----------
-  /**
-   * @param {string|number} tid 歌单 id
-   * @returns {Promise<{name:string,songs:Array<{songmid:string,title:string,artist:string,album:string}>}>}
-   */
-  async function getPlaylistSongs(tid) {
-    if (!tid) throw new Error('getPlaylistSongs 需要 tid');
-    const data = await callLocal('/songlist', { id: tid });
+  async function getPlaylistSongs(playlistId) {
+    if (!playlistId) throw new Error('getPlaylistSongs 需要 playlistId');
+    const data = await callLocal('/songlist', { id: playlistId });
     const songlist = data?.songlist || [];
     return {
       name: data?.dissname || '',
       total: data?.songnum || songlist.length,
       songs: songlist.map((s) => ({
-        songmid: s.songmid || s.mid,
+        songId: s.songmid || s.mid,
         title: s.songname || s.name,
         artist: (s.singer || []).map((x) => x.name).join('/'),
         album: s.albumname || s.album?.name || '',
@@ -365,6 +328,7 @@ export function createQQMusic(opts = {}) {
   }
 
   return {
+    kind: 'qq',
     search,
     getPlayUrl,
     getMyPlaylists,

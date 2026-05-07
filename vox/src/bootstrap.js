@@ -10,13 +10,14 @@ import { callBrain, resolveBrainBin } from './brain.js';
 
 /**
  * @param {object} args
- * @param {object} args.qq          createQQMusic() 实例
+ * @param {import('./music/index.js').MusicProvider} args.music
  * @param {string} args.dataDir     data/ 目录绝对路径
- * @param {Array<{tid, name, kind, n?}>} args.picks
+ * @param {Array<{playlistId, name, kind, n?}>} args.picks
  *        用户选的歌单，每个指明抽样方式：
  *          kind='all'    全量
  *          kind='random' 随机 n 首
  *          kind='front'  前 n 首
+ *        playlistId 是统一字段；兼容老版 picks 里的 tid（自动 fallback）
  * @param {(evt: {stage:string, detail?:string, pct?:number}) => void} [args.onProgress]
  * @param {number} [args.timeoutMs]
  * @returns {Promise<{
@@ -29,7 +30,7 @@ import { callBrain, resolveBrainBin } from './brain.js';
  *   rawLength: number,
  * }>}
  */
-export async function bootstrapTaste({ qq, dataDir, picks, onProgress, timeoutMs = 8 * 60_000 }) {
+export async function bootstrapTaste({ music, dataDir, picks, onProgress, timeoutMs = 8 * 60_000 }) {
   const progress = (stage, detail, pct) => {
     try { onProgress?.({ stage, detail, pct }); } catch {}
   };
@@ -45,8 +46,9 @@ export async function bootstrapTaste({ qq, dataDir, picks, onProgress, timeoutMs
   const samples = [];
   for (let i = 0; i < picks.length; i++) {
     const p = picks[i];
+    const pid = p.playlistId || p.tid; // 兼容老版前端字段
     progress('sampling', `拉取：${p.name}`, Math.floor((i / picks.length) * 40));
-    const detail = await qq.getPlaylistSongs(p.tid);
+    const detail = await music.getPlaylistSongs(pid);
     const total = detail.songs.length;
     const picked = sample(detail.songs, p);
     progress('sampling', `${p.name}: ${total} 首 → 采样 ${picked.length} 首 (${describeKind(p)})`);

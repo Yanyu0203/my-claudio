@@ -15,7 +15,7 @@
 import 'dotenv/config';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { createQQMusic } from '../src/qqmusic.js';
+import { createProvider } from '../src/music/index.js';
 import { bootstrapTaste } from '../src/bootstrap.js';
 
 const __filename = fileURLToPath(import.meta.url);
@@ -33,20 +33,20 @@ const DEFAULT_STRATEGY = {
 };
 
 async function main() {
-  const qq = createQQMusic({
+  const music = createProvider(process.env.MUSIC_PROVIDER || 'qq', {
     apiBase: process.env.QQMUSIC_API_URL,
-    uin: process.env.QQ_UIN,
+    userId: process.env.QQ_UIN,
   });
 
   console.log('\n[1/2] 拉你的歌单列表...');
-  const all = await qq.getMyPlaylists();
+  const all = await music.getMyPlaylists();
   console.log(`  ✅ 共 ${all.length} 个歌单`);
 
   const picks = [];
   for (const [name, strategy] of Object.entries(DEFAULT_STRATEGY)) {
     const found = all.find((p) => p.name === name);
     if (found) {
-      picks.push({ tid: found.tid, name: found.name, ...strategy });
+      picks.push({ playlistId: found.playlistId, name: found.name, ...strategy });
     }
   }
 
@@ -69,7 +69,7 @@ async function main() {
 
   console.log('\n[2/2] 开始抽样 + 调大脑 + 写 taste.md...');
   const result = await bootstrapTaste({
-    qq,
+    music,
     dataDir: DATA_DIR,
     picks,
     onProgress: (e) => {
