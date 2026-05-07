@@ -16,7 +16,7 @@ import { Store } from './src/state.js';
 import { getDB, purgeExpiredCache } from './src/db.js';
 import { getWeather } from './src/weather.js';
 import { planNextBlock } from './src/bridge.js';
-import { resolveAll } from './src/resolver.js';
+import { searchAll, fetchUrlFor, prefetchUrls } from './src/resolver.js';
 import { classifyMessage, chatReply } from './src/chat.js';
 import { resolveBrainBin, getBrainFlavor } from './src/brain.js';
 import { bootstrapTaste } from './src/bootstrap.js';
@@ -37,7 +37,12 @@ const __dirname = path.dirname(__filename);
 
 // ---------- 配置 ----------
 const PORT = Number(process.env.PORT || 8080);
-const SONGS_PER_BLOCK = Number(process.env.SONGS_PER_BLOCK || 5);
+const SONGS_PER_BLOCK = Number(process.env.SONGS_PER_BLOCK || 10);
+// 拿到 block 后立即预热前 N 首的 mp3 直链（保证点 PLAY 就能响）
+// 其余歌等播到时再拉（懒加载），避免一次性 getPlayUrl 10 次 + 直链更新鲜
+const PREFETCH_URLS = Number(process.env.PREFETCH_URLS || 2);
+// 用户正在播第 k 首时，主动去把第 (k+PREFETCH_AHEAD) 首的 url 拉好
+const PREFETCH_AHEAD = Number(process.env.PREFETCH_AHEAD || 2);
 
 // 数据目录：默认 ../data（与 vox 同级），可通过 VOX_DATA_DIR 覆盖
 // （CLAUDIO_DATA_DIR 作为历史名保留兼容）
@@ -256,6 +261,53 @@ let blockSeq = 0;
 const AUTH_WINDOW_SIZE = 2;          // 最近 2 个 block
 const AUTH_FAIL_THRESHOLD = 7;       // 累计 7 个疑似 → probe（比如两个 block 各 3~5 首失败）
 const authFailWindow = [];
+
+// ---------- 懒加载 mp3 直链 ----------
+// 记录哪些 idx 正在被拉（避免短时间内前端重复请求 ensure_url / song_advance 撞车）
+const inflightUrlFetches = new Set(); // key: `${seq}-${idx}`  seq=block 的 startedAt 用作标识
+/**
+ * 按需拿某一首的 url（懒加载）。拿到后通过 song_url_ready 广播给所有前端。
+ * 幂等：同一首正在拉时不会并发重复拉。
+ * 如果已有 url 直接返回。
+ */
+async function ensureUrlAsync(block, idx) {
+  if (!block || !Array.isArray(block.songs)) return;
+  if (idx < 0 || idx >= block.songs.length) return;
+  const song = block.songs[idx];
+  if (!song || song.url) return; // 已经有 url，跳过
+  if (!song.songmid) return;     // meta 都没有的不管
+
+  const key = `${block.startedAt || '?'}-${idx}`;
+  if (inflightUrlFetches.has(key)) return;
+  inflightUrlFetches.add(key);
+
+  try {
+    const { url, authFail } = await fetchUrlFor(qq, song);
+    if (url) {
+      song.url = url; // 就地改 session 里的 song
+      // 广播给所有前端（多标签同步）
+      broadcaster.send('song_url_ready', {
+        idx,
+        songmid: song.songmid,
+        url,
+      });
+      console.log(`[lazy-url] idx=${idx} ${song.title} → 拿到直链`);
+    } else {
+      // 拿不到：通知前端，前端会跳到下一首
+      broadcaster.send('song_url_failed', {
+        idx,
+        songmid: song.songmid,
+        reason: authFail ? 'auth' : 'no-url',
+      });
+      console.warn(`[lazy-url] idx=${idx} ${song.title} → 拿不到直链${authFail ? '(authFail)' : ''}`);
+    }
+  } catch (e) {
+    console.error(`[lazy-url] idx=${idx} 异常:`, e.message);
+  } finally {
+    inflightUrlFetches.delete(key);
+  }
+}
+
 /**
  * @param {*} sender
  * @param {string} userIntent  用户额外要求
@@ -317,7 +369,59 @@ async function generateAndSend(sender, userIntent = '', replace = false) {
 
     sender.send('status', { stage: 'resolving', silent });
     const tResolve = Date.now();
-    const { playable, failed, authFailCount } = await resolveAll(qq, plan.play);
+
+    // 阶段 A：只搜 meta（不拿 mp3 直链）。这一步快，10 首歌大概 10-15 秒
+    const { resolved, failed } = await searchAll(qq, plan.play);
+    console.log(
+      `[block #${seq}] search 完成 (${((Date.now() - tResolve) / 1000).toFixed(1)}s): ` +
+      `搜到 ${resolved.length}/${plan.play.length}` +
+      (failed.length ? `, 搜不到: ${failed.map((f) => f.title).join(', ')}` : '')
+    );
+
+    if (!resolved.length) {
+      const failedList = failed
+        .map((f) => `${f.title} - ${f.artist}`)
+        .slice(0, 5)
+        .join(' / ');
+      console.warn(`[block #${seq}] ❌ 一首都没搜到，退出`);
+      sender.send('error', {
+        message:
+          `大脑选了 ${plan.play.length} 首，QQ 音乐都没搜到 ☹️\n` +
+          `候选: ${failedList}\n` +
+          `可能：搜歌被风控（稍等 30 秒重试），或大脑推荐了非常冷门的歌`,
+        failed,
+      });
+      return;
+    }
+
+    // 阶段 B：预热前 N 首的 mp3 直链（保证点 PLAY 就能响）
+    // 其余歌等播到时再懒加载（触发 ensure_url）
+    const tPrefetch = Date.now();
+    const { authFailCount } = await prefetchUrls(qq, resolved, PREFETCH_URLS);
+
+    // 过滤出真能播的（有 url 的 + songmid 有的但 url 还没拿的先都算能播，等懒加载）
+    // 前面预热失败的那几个（如果 url=''），就是没拿到直链，从能播列表移除
+    const playable = resolved.filter((s, i) => {
+      if (i < PREFETCH_URLS) {
+        // 预热范围内必须有 url，没拿到的踢出
+        return !!s.url;
+      }
+      // 超出预热范围的先保留（等懒加载）
+      return true;
+    });
+    const prefetchFailedCount = PREFETCH_URLS - playable.slice(0, PREFETCH_URLS).length;
+    // 预热失败的也补到 failed 列表
+    if (prefetchFailedCount > 0) {
+      for (let i = 0; i < Math.min(PREFETCH_URLS, resolved.length); i++) {
+        if (!resolved[i].url) {
+          failed.push({
+            title: resolved[i].title,
+            artist: resolved[i].artist,
+            reason: 'no-url',
+          });
+        }
+      }
+    }
 
     // 跨 block 累计：本 block authFailCount 叠加到上个 block 的余量
     authFailWindow.push(authFailCount);
@@ -325,21 +429,20 @@ async function generateAndSend(sender, userIntent = '', replace = false) {
     const windowSum = authFailWindow.reduce((a, b) => a + b, 0);
 
     console.log(
-      `[block #${seq}] resolve 完成 (${((Date.now() - tResolve) / 1000).toFixed(1)}s): ` +
-      `可播 ${playable.length}/${plan.play.length}` +
-      (failed.length ? `, 失败: ${failed.map((f) => f.title).join(', ')}` : '') +
+      `[block #${seq}] prefetch 前${PREFETCH_URLS}首 (${((Date.now() - tPrefetch) / 1000).toFixed(1)}s): ` +
+      `可播 ${playable.length}/${resolved.length}` +
       (authFailCount ? ` [auth-suspect=${authFailCount}, 窗口累计=${windowSum}/${AUTH_FAIL_THRESHOLD}]` : '')
     );
 
     // 触发 probe 的条件（任一满足）：
-    //   (a) 单个 block 里疑似 authFail 过半（大概率整体失败，需要尽快定性）
-    //   (b) 滑动窗口（最近 N 个 block）累计疑似 authFail ≥ 阈值
-    const blockMajority = plan.play.length > 0 && authFailCount >= Math.ceil(plan.play.length * 0.6);
+    //   (a) 预热段里 authFailCount 过半
+    //   (b) 滑动窗口累计 ≥ 阈值
+    const blockMajority = PREFETCH_URLS > 0 && authFailCount >= Math.ceil(PREFETCH_URLS * 0.6);
     const windowOverflow = windowSum >= AUTH_FAIL_THRESHOLD;
     if (blockMajority || windowOverflow) {
       console.warn(
         `[block #${seq}] ⚠️ 触发 cookie 探测：` +
-        (blockMajority ? `本 block ${authFailCount}/${plan.play.length} 疑似 ` : '') +
+        (blockMajority ? `预热段 ${authFailCount}/${PREFETCH_URLS} 疑似 ` : '') +
         (windowOverflow ? `窗口累计 ${windowSum} ≥ ${AUTH_FAIL_THRESHOLD}` : '')
       );
       const state = await probeCookieAlive({
@@ -347,7 +450,6 @@ async function generateAndSend(sender, userIntent = '', replace = false) {
         uin: process.env.QQ_UIN,
       });
       console.log(`[qqauth] probe 结果: ${state}`);
-      // 无论什么结果都重置信号和窗口，防止反复 probe
       resetAuthFailSignals();
       authFailWindow.length = 0;
 
@@ -356,8 +458,6 @@ async function generateAndSend(sender, userIntent = '', replace = false) {
         sender.send('qq_auth_required', { reason: 'cookie 已过期' });
         return;
       }
-      // ok / unknown → 不熔断，继续走正常流程
-      // 如果 playable 为 0（全废），大概率是本轮大脑挑了一水的 VIP 受限歌 → 给用户提示
       if (state === 'ok' && !playable.length) {
         console.log('[qqauth] cookie 验证正常，本轮失败属于 VIP / 版权问题');
       }
@@ -368,11 +468,11 @@ async function generateAndSend(sender, userIntent = '', replace = false) {
         .map((f) => `${f.title} - ${f.artist}`)
         .slice(0, 5)
         .join(' / ');
-      const hasAuthSuspect = failed.some((f) => f.reason === 'auth-suspect');
-      console.warn(`[block #${seq}] ❌ 全部失败，退出`);
+      const hasAuthSuspect = authFailCount > 0;
+      console.warn(`[block #${seq}] ❌ 没能播的歌，退出`);
       sender.send('error', {
         message:
-          `大脑选了 ${plan.play.length} 首，QQ 音乐都没找到 ☹️\n` +
+          `大脑选了 ${plan.play.length} 首，没一首能拿到播放链接 ☹️\n` +
           `候选: ${failedList}\n` +
           (hasAuthSuspect
             ? `可能：这批歌存在 VIP / 版权受限（probe 已确认 cookie 还有效）`
@@ -389,6 +489,7 @@ async function generateAndSend(sender, userIntent = '', replace = false) {
       songs: playable,
       failed,
       replace,
+      startedAt: Date.now(),
       weather: weather
         ? { text: weather.text, temp: weather.temp, theme: weather.theme }
         : null,
@@ -450,6 +551,21 @@ async function handleClientMessage(msg, sender) {
         session.currentIdx = data.idx;
         session.currentPos = 0;
         session.currentPosUpdatedAt = Date.now();
+        // 主动预热接下来要播的几首：idx+1 ... idx+PREFETCH_AHEAD
+        // 至少保证下一首 (idx+1) 在播之前 url 已就绪，避免 ended → 卡顿
+        for (let k = 1; k <= PREFETCH_AHEAD; k++) {
+          ensureUrlAsync(session.currentBlock, data.idx + k);
+        }
+      }
+      break;
+    }
+
+    case 'ensure_url': {
+      // 前端主动请求某一首的 url（懒加载）
+      // data: { idx: number }
+      const idx = Number(data?.idx);
+      if (Number.isInteger(idx)) {
+        ensureUrlAsync(session.currentBlock, idx);
       }
       break;
     }
@@ -465,6 +581,10 @@ async function handleClientMessage(msg, sender) {
         session.lastDjSay = session.currentBlock.say || session.lastDjSay;
         session.weather = session.currentBlock.weather || session.weather;
         console.log('[session] 用掉 nextBlock 转为当前段');
+        // 新段的前 PREFETCH_AHEAD 首如果还没 url 就预拉一下，避免切段时卡住
+        for (let i = 0; i < Math.min(PREFETCH_AHEAD, session.currentBlock.songs.length); i++) {
+          ensureUrlAsync(session.currentBlock, i);
+        }
       }
       break;
     }

@@ -15,6 +15,9 @@ let errorRetryCount = 0;
 let errorRetryTimer = null;
 const ERROR_RETRY_LIMIT = 1;
 
+// lazy-url 兜底：等 ensure_url 超时就跳下一首
+let lazyUrlTimer = null;
+
 // 主题模式: 'auto' = 跟天气, 其他 = 手动锁定
 const THEME_PREF_KEY = 'vox.themePref';
 let themePref = localStorage.getItem(THEME_PREF_KEY) || 'auto';
@@ -289,6 +292,12 @@ function handleServer({ type, data }) {
     case 'qq_cookie_update_result':
       handleQQCookieUpdateResult(data);
       break;
+    case 'song_url_ready':
+      handleSongUrlReady(data);
+      break;
+    case 'song_url_failed':
+      handleSongUrlFailed(data);
+      break;
   }
 }
 
@@ -335,6 +344,29 @@ function handleHello(data) {
     currentRating = null;
     refreshRateButtons?.();
     renderCurrentSong();
+
+    if (!current.url) {
+      // 懒加载：server 恢复过来时这首 url 还没就绪，等 song_url_ready
+      console.log('[hello] current.url 空，请求 ensure_url');
+      setStatus('LOADING // ' + current.title);
+      const waitingSongmid = current.songmid;
+      send('ensure_url', { idx });
+      renderQueue();
+      document.title = `⏳ ${current.title} — ${current.artist} // VOX`;
+      maybePrefetch();
+      // 兜底超时：8s 没拿到 url 跳下一首
+      if (lazyUrlTimer) clearTimeout(lazyUrlTimer);
+      lazyUrlTimer = setTimeout(() => {
+        lazyUrlTimer = null;
+        if (current && !current.url && current.songmid === waitingSongmid) {
+          console.warn('[hello] 等 lazy-url 超时，跳过');
+          current = null;
+          playNext();
+        }
+      }, 8000);
+      return;
+    }
+
     audio.src = current.url;
 
     // 等元数据加载好再 seek
@@ -463,7 +495,41 @@ function playNext() {
   // 清掉上一首遗留的重试状态
   errorRetryCount = 0;
   if (errorRetryTimer) { clearTimeout(errorRetryTimer); errorRetryTimer = null; }
-  console.log(`[play] 开始 [${current.title} - ${current.artist}]`);
+  // 清掉上一首遗留的 lazy-url 等待 timer
+  if (lazyUrlTimer) { clearTimeout(lazyUrlTimer); lazyUrlTimer = null; }
+  console.log(`[play] 开始 [${current.title} - ${current.artist}] (url=${current.url ? '有' : '空'})`);
+
+  // 懒加载 url：如果这首还没拿到直链，发 ensure_url 等 server 回 song_url_ready
+  if (!current.url) {
+    console.log(`[play] url 未就绪，等懒加载...`);
+    setStatus('LOADING // ' + current.title);
+    // 显式停掉上一首的 audio：避免"看着已经切歌但音频还在播上一首"的错觉
+    programmaticPause = true;
+    try { audio.pause(); } catch {}
+    try { audio.removeAttribute('src'); audio.load(); } catch {}
+
+    const idx = (window.__currentBlockSongs || 1) - queue.length - 1;
+    const waitingSongmid = current.songmid;
+    send('ensure_url', { idx: Math.max(0, idx) });
+    renderCurrentSong();
+    renderQueue();
+    document.title = `⏳ ${current.title} — ${current.artist} // VOX`;
+    reportSongAdvance();
+    maybePrefetch();
+
+    // 兜底超时：8s 内没拿到 url → 跳下一首
+    lazyUrlTimer = setTimeout(() => {
+      lazyUrlTimer = null;
+      if (current && !current.url && current.songmid === waitingSongmid) {
+        console.warn(`[play] 等 lazy-url 超时（8s），跳过 "${current.title}"`);
+        pushSysLog(`"${current.title}" 拿不到直链，跳过`);
+        current = null; // 防止后续 played 误报
+        playNext();
+      }
+    }, 8000);
+    return;
+  }
+
   audio.src = current.url;
   audio.play()
     .then(() => console.log('[play] ✓ 已开始播放'))
@@ -1535,3 +1601,55 @@ function setupQQAuthUI() {
 }
 
 setupQQAuthUI();
+
+// ============================================================
+// 懒加载 mp3 直链：server 拿到后广播，前端对号入座
+// ============================================================
+function handleSongUrlReady({ songmid, url }) {
+  if (!url) return;
+  // 1) 如果就是当前正在等的歌（current.url 空、songmid 对上）→ 立刻启播
+  if (current && !current.url && current.songmid === songmid) {
+    console.log(`[lazy-url] ✓ current 拿到直链，启播: ${current.title}`);
+    if (lazyUrlTimer) { clearTimeout(lazyUrlTimer); lazyUrlTimer = null; }
+    current.url = url;
+    audio.src = url;
+    audio.play()
+      .then(() => {
+        setStatus('SYS // ONLINE', true);
+        document.title = `▶ ${current.title} — ${current.artist} // VOX`;
+      })
+      .catch((err) => {
+        console.warn('[lazy-url] autoplay 被拦', err.name);
+        if (err.name === 'NotAllowedError') {
+          setStatus('CLICK ▶ TO PLAY');
+        }
+      });
+    return;
+  }
+  // 2) 队列里对应那首 → 填 url（播到时就不用等了）
+  const target = queue.find((s) => s.songmid === songmid);
+  if (target && !target.url) {
+    target.url = url;
+    console.log(`[lazy-url] queue 里 "${target.title}" 更新 url`);
+  }
+}
+
+function handleSongUrlFailed({ idx, songmid, reason }) {
+  console.warn(`[lazy-url] 失败 idx=${idx} songmid=${songmid} reason=${reason}`);
+  // 如果是当前正在等的歌 → 直接跳下一首
+  if (current && !current.url && current.songmid === songmid) {
+    if (lazyUrlTimer) { clearTimeout(lazyUrlTimer); lazyUrlTimer = null; }
+    setStatus('SKIP // 直链拿不到');
+    pushSysLog(`"${current.title}" 拿不到直链（${reason === 'auth' ? 'cookie 问题' : 'VIP/版权'}），跳过`);
+    current = null; // 避免 ended 事件被误触
+    playNext();
+    return;
+  }
+  // 队列里那首 → 从队列移除（避免将来播到还等半天）
+  const before = queue.length;
+  queue = queue.filter((s) => s.songmid !== songmid);
+  if (queue.length < before) {
+    console.log(`[lazy-url] 从队列移除 songmid=${songmid}`);
+    renderQueue();
+  }
+}
