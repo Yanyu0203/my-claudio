@@ -13,7 +13,7 @@ import { WebSocketServer } from 'ws';
 
 import { createProvider } from './src/music/index.js';
 import { Store } from './src/state.js';
-import { getDB, purgeExpiredCache } from './src/db.js';
+import { getDB, purgeExpiredCache, kvGet, kvSet } from './src/db.js';
 import { getWeather } from './src/weather.js';
 import { planNextBlock } from './src/bridge.js';
 import { searchAll, fetchUrlFor, prefetchUrls } from './src/resolver.js';
@@ -150,6 +150,28 @@ function providerInfo() {
 // 初始化 DB（单例），并清理过期缓存
 getDB(DATA_DIR);
 purgeExpiredCache();
+
+// 检测 provider 切换：上次用的和这次不一样 → 顺手清掉老 provider 的缓存
+// 新缓存 key 带 provider kind 前缀（见 resolver.js），所以混用不会错读，
+// 只是切换后老 kind 的记录会一直占空间到 TTL 过期。清一下更清爽。
+try {
+  const lastProvider = kvGet('music_provider');
+  if (lastProvider && lastProvider !== music.kind) {
+    console.log(
+      `[music] provider 切换 ${lastProvider} → ${music.kind}，清理老 provider 的缓存...`
+    );
+    const db = getDB();
+    const likePattern = `${lastProvider}:%`;
+    let n = 0;
+    n += db.prepare('DELETE FROM song_cache WHERE key LIKE ?').run(likePattern).changes;
+    n += db.prepare('DELETE FROM song_cache_meta WHERE key LIKE ?').run(likePattern).changes;
+    n += db.prepare('DELETE FROM song_cache_miss WHERE key LIKE ?').run(likePattern).changes;
+    console.log(`[music] 清了 ${n} 条 ${lastProvider}: 前缀的缓存`);
+  }
+  kvSet('music_provider', music.kind);
+} catch (e) {
+  console.warn('[music] provider 切换检测异常（忽略）:', e.message);
+}
 
 const store = new Store(DATA_DIR);
 await store.init();

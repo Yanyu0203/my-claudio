@@ -13,13 +13,21 @@
  *   - song_cache_meta    4h：只有 meta（songId/cover/duration），跳过阶段 A
  *   - song_cache_miss    5m：真没搜到（风控不写）
  *
- * 注意：缓存 key 只用 title|artist，不含 provider kind。
- *       切换 provider 时（qq ↔ netease）老缓存不兼容，调用方应清 song_cache* 三表。
+ * 缓存 key 格式：`{provider.kind}:{title}|{artist}`
+ *   - 前缀 provider.kind 是为了隔离不同音乐源（QQ 的 songmid 是 base62 hash，
+ *     Netease 的 songId 是纯数字，混用会让 getPlayUrl 把别家的 id 当自家的查，必 fail）
+ *   - 切 provider 后老缓存不会命中（key 前缀不同），会自然因 TTL 过期被清
  */
 import { cacheGet, cacheSet } from './db.js';
 
 const CACHE_MS = 4 * 60 * 60 * 1000; // 4 小时
 const MISS_CACHE_MS = 5 * 60 * 1000; // 5 分钟
+
+/** 生成带 provider kind 前缀的缓存 key */
+function buildCacheKey(music, title, artist) {
+  const kind = music?.kind || 'unknown';
+  return `${kind}:${normKey(title)}|${normKey(artist)}`;
+}
 
 // ============================================================
 // 阶段 A：searchAll —— 只搜 meta，不拿 url
@@ -51,7 +59,7 @@ export async function searchAll(music, picks) {
 }
 
 async function searchOne(music, p) {
-  const cacheKey = `${normKey(p.title)}|${normKey(p.artist)}`;
+  const cacheKey = buildCacheKey(music, p.title, p.artist);
 
   // 1) 完整缓存（search + url 都有）
   const cached = cacheGet('song_cache', cacheKey);
@@ -127,7 +135,7 @@ async function searchOne(music, p) {
 export async function fetchUrlFor(music, song) {
   if (!song?.songId) return { url: '', authFail: false };
 
-  const cacheKey = `${normKey(song.title)}|${normKey(song.artist)}`;
+  const cacheKey = buildCacheKey(music, song.title, song.artist);
 
   // 完整缓存命中
   const cached = cacheGet('song_cache', cacheKey);
