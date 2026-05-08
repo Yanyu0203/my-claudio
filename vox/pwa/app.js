@@ -76,6 +76,27 @@ const bootstrapLog = $('bootstrapLog');
 const bootstrapDoneBtn = $('bootstrapDoneBtn');
 const bootstrapDoneDetail = $('bootstrapDoneDetail');
 
+// Refine Taste Modal
+const refineTasteBtn = $('refineTasteBtn');
+const refineModal = $('refineModal');
+const refineClose = $('refineClose');
+const refineStepStatus = $('refineStepStatus');
+const refineStepProgress = $('refineStepProgress');
+const refineStepDone = $('refineStepDone');
+const refineDeltaCountEl = $('refineDeltaCount');
+const refinePlayCountEl = $('refinePlayCount');
+const refineThresholdInput = $('refineThresholdInput');
+const refineThresholdSave = $('refineThresholdSave');
+const refineLastRunAtEl = $('refineLastRunAt');
+const refineHint = $('refineHint');
+const refineGoBtn = $('refineGoBtn');
+const refineStage = $('refineStage');
+const refineBarFill = $('refineBarFill');
+const refineDetail = $('refineDetail');
+const refineLog = $('refineLog');
+const refineDoneBtn = $('refineDoneBtn');
+const refineChangelog = $('refineChangelog');
+
 // ============================================================
 // Loading 状态机
 // ============================================================
@@ -267,6 +288,15 @@ function handleServer({ type, data }) {
       break;
     case 'bootstrap_done':
       handleBootstrapDone(data);
+      break;
+    case 'refine_status':
+      handleRefineStatus(data);
+      break;
+    case 'refine_progress':
+      handleRefineProgress(data);
+      break;
+    case 'refine_done':
+      handleRefineDone(data);
       break;
     case 'control':
       // 服务端要求执行某个动作（目前只有 skip）
@@ -1072,6 +1102,171 @@ async function checkBootstrapNeeded() {
     console.warn('[bootstrap] health check fail', e);
   }
 }
+
+// ============================================================
+// Refine Taste (画像压实)
+// ============================================================
+// 本地缓存最近一次 status，用来：
+// 1) 决定顶栏 ⟳ 是否脉冲提醒
+// 2) 打开弹窗时先渲染旧数据，避免空白闪烁
+let lastRefineStatus = null;
+
+refineTasteBtn.addEventListener('click', () => {
+  openRefineModal();
+});
+refineClose.addEventListener('click', closeRefineModal);
+refineModal.querySelector('.history-backdrop').addEventListener('click', closeRefineModal);
+refineGoBtn.addEventListener('click', () => {
+  if (refineGoBtn.disabled) return;
+  refineStepStatus.style.display = 'none';
+  refineStepProgress.style.display = '';
+  refineStepDone.style.display = 'none';
+  refineStage.textContent = 'STARTING';
+  refineDetail.textContent = '准备中...';
+  refineDetail.style.color = 'var(--neon-pri)';
+  refineBarFill.style.width = '1%';
+  refineLog.innerHTML = '';
+  send('refine_start', {});
+});
+refineThresholdSave.addEventListener('click', () => {
+  const v = parseInt(refineThresholdInput.value, 10);
+  if (!Number.isFinite(v)) return;
+  send('refine_set_threshold', { threshold: v });
+});
+refineThresholdInput.addEventListener('keydown', (e) => {
+  if (e.key === 'Enter') refineThresholdSave.click();
+});
+refineDoneBtn.addEventListener('click', closeRefineModal);
+
+function openRefineModal() {
+  refineStepStatus.style.display = '';
+  refineStepProgress.style.display = 'none';
+  refineStepDone.style.display = 'none';
+  // 用上次缓存填充（避免空白）
+  if (lastRefineStatus) renderRefineStatus(lastRefineStatus);
+  refineModal.classList.add('show');
+  // 再向 server 要最新的
+  send('refine_status', {});
+}
+function closeRefineModal() {
+  refineModal.classList.remove('show');
+}
+
+function handleRefineStatus(s) {
+  // s: { newDeltaCount, newPlayCount, threshold, lastRunAt, running, error? }
+  if (s.error) {
+    console.warn('[refine] status error', s.error);
+    return;
+  }
+  lastRefineStatus = s;
+  renderRefineStatus(s);
+  // 顶栏按钮：待合并 ≥ 阈值时脉冲提醒
+  const shouldPulse = (s.newDeltaCount || 0) >= (s.threshold || 30);
+  refineTasteBtn.classList.toggle('has-pending', shouldPulse);
+  refineTasteBtn.setAttribute(
+    'data-tip',
+    shouldPulse
+      ? `有 ${s.newDeltaCount} 条新反馈待合并（阈值 ${s.threshold}）`
+      : '合并最近反馈，演化画像'
+  );
+}
+function renderRefineStatus(s) {
+  refineDeltaCountEl.textContent = s.newDeltaCount ?? '-';
+  refinePlayCountEl.textContent = s.newPlayCount ?? '-';
+  refineThresholdInput.value = s.threshold ?? '';
+  refineLastRunAtEl.textContent = s.lastRunAt
+    ? new Date(s.lastRunAt).toLocaleString()
+    : '从未压实';
+
+  // 命中阈值高亮
+  const hit = (s.newDeltaCount || 0) >= (s.threshold || 30);
+  refineDeltaCountEl.classList.toggle('count-hit', hit);
+
+  // 按钮文案 / 状态
+  refineGoBtn.disabled = !!s.running || (s.newDeltaCount || 0) === 0;
+  if (s.running) {
+    refineGoBtn.textContent = '压实中...';
+    refineHint.textContent = '有一次压实正在跑';
+  } else if ((s.newDeltaCount || 0) === 0 && (s.newPlayCount || 0) === 0) {
+    refineGoBtn.textContent = '暂无增量';
+    refineHint.textContent = '还没积累新的反馈';
+  } else {
+    refineGoBtn.textContent = '立即压实';
+    refineHint.textContent = hit
+      ? '已达到阈值，建议压实'
+      : `未到阈值（差 ${(s.threshold || 30) - (s.newDeltaCount || 0)} 条），也可以手动提前跑`;
+  }
+}
+
+function handleRefineProgress(evt) {
+  // 用户可能没开 modal（自动触发）→ 也要切到进度视图
+  if (!refineModal.classList.contains('show')) {
+    refineModal.classList.add('show');
+  }
+  refineStepStatus.style.display = 'none';
+  refineStepDone.style.display = 'none';
+  refineStepProgress.style.display = '';
+
+  if (evt.stage === 'error') {
+    refineStage.textContent = 'ERROR';
+    refineDetail.textContent = evt.detail || '出错了';
+    refineDetail.style.color = 'var(--warn, #ffb800)';
+    appendRefineLog(evt.detail || '出错了', true);
+    refineGoBtn.disabled = false;
+    refineGoBtn.textContent = '重试';
+    // 错误时自动回到状态页，方便再试
+    setTimeout(() => {
+      refineStepProgress.style.display = 'none';
+      refineStepStatus.style.display = '';
+    }, 1500);
+    return;
+  }
+  refineStage.textContent = String(evt.stage || '').toUpperCase();
+  if (evt.detail) {
+    refineDetail.textContent = evt.detail;
+    refineDetail.style.color = 'var(--neon-pri)';
+    appendRefineLog(evt.detail, false);
+  }
+  if (typeof evt.pct === 'number') {
+    refineBarFill.style.width = Math.min(100, Math.max(0, evt.pct)) + '%';
+  }
+}
+function appendRefineLog(text, isErr) {
+  const row = document.createElement('div');
+  row.className = 'log-row' + (isErr ? ' err' : '');
+  row.textContent = `[${new Date().toLocaleTimeString()}] ${text}`;
+  refineLog.appendChild(row);
+  refineLog.scrollTop = refineLog.scrollHeight;
+}
+function handleRefineDone(info) {
+  // 刷新顶栏脉冲状态
+  send('refine_status', {});
+  if (info.skipped) {
+    // 自动触发 + 没增量 = 不打扰用户
+    if (!refineModal.classList.contains('show')) return;
+    refineStepProgress.style.display = 'none';
+    refineStepStatus.style.display = '';
+    refineHint.textContent = '没有新增量可压实';
+    return;
+  }
+  refineStepProgress.style.display = 'none';
+  refineStepDone.style.display = '';
+  refineChangelog.textContent = info.changelog || '（本次没有 CHANGELOG）';
+}
+
+// 启动时问一次状态（用于决定顶栏是否脉冲）
+function requestRefineStatusSoon() {
+  // 等 ws 打开
+  const tryOnce = () => {
+    if (ws && ws.readyState === 1) {
+      send('refine_status', {});
+    } else {
+      setTimeout(tryOnce, 500);
+    }
+  };
+  setTimeout(tryOnce, 800);
+}
+requestRefineStatusSoon();
 
 // ============================================================
 // UI

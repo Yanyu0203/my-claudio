@@ -20,6 +20,12 @@ import { searchAll, fetchUrlFor, prefetchUrls, invalidateSongUrlCache } from './
 import { classifyMessage, chatReply } from './src/chat.js';
 import { resolveBrainBin, getBrainFlavor } from './src/brain.js';
 import { bootstrapTaste } from './src/bootstrap.js';
+import {
+  refineTaste,
+  countPendingSignals,
+  setRefineThreshold,
+  shouldAutoTrigger,
+} from './src/refine.js';
 import { promptAndWriteQQUin } from './scripts/setup-qquin.js';
 import { isPlaceholderUin, upsertEnv } from './scripts/_lib/env-helper.js';
 import {
@@ -356,6 +362,7 @@ wss.on('connection', (ws) => {
 // ---------- 核心：生成 + 推送一段 ----------
 let inFlight = false; // 防止并发生成
 let bootstrapRunning = false; // 画像生成中（整个进程共用一把锁）
+let refineRunning = false;    // 画像压实中
 let blockSeq = 0;
 
 // 跨 block 的疑似 authFail 滑动窗口（最近 N 个 block，累计 ≥ 阈值时主动 probe）
@@ -498,6 +505,77 @@ async function startQrLoginFlow(sender) {
   _qrSession.timer = setTimeout(poll, QR_POLL_INTERVAL_MS);
 }
 
+// ---------- 画像压实 ----------
+/**
+ * 执行一次压实，进度通过 broadcaster 推给所有前端
+ * @param {object} [opts]
+ * @param {boolean} [opts.silent]  true=不向前端报进度/done（自动触发时用）
+ */
+async function runRefine(opts = {}) {
+  if (refineRunning) {
+    broadcaster.send('refine_progress', { stage: 'error', detail: '画像已在压实中，请等完成' });
+    return { ok: false, skipped: true };
+  }
+  if (bootstrapRunning) {
+    broadcaster.send('refine_progress', { stage: 'error', detail: '画像冷启动中，稍后再试' });
+    return { ok: false, skipped: true };
+  }
+  refineRunning = true;
+  const silent = !!opts.silent;
+  console.log(`[refine] 开始${silent ? ' (SILENT)' : ''}`);
+  if (!silent) broadcaster.send('refine_progress', { stage: 'starting', detail: '准备...', pct: 1 });
+  try {
+    const result = await refineTaste({
+      dataDir: DATA_DIR,
+      onProgress: (evt) => {
+        if (!silent) broadcaster.send('refine_progress', evt);
+      },
+    });
+    if (result.skipped) {
+      console.log('[refine] 没有增量，跳过');
+      if (!silent) broadcaster.send('refine_done', { skipped: true });
+      return result;
+    }
+    console.log(
+      `[refine] ✅ 完成 耗时 ${(result.durationMs / 1000).toFixed(1)}s，` +
+      `合并 ${result.consumedDeltaCount} 条 delta + ${result.consumedPlayCount} 条历史`
+    );
+    broadcaster.send('refine_done', {
+      changelog: result.changelog,
+      consumedDeltaCount: result.consumedDeltaCount,
+      consumedPlayCount: result.consumedPlayCount,
+      durationMs: result.durationMs,
+      silent,
+    });
+    // 画像变了：扔掉已 prefetch 的 nextBlock，让下一段用新画像
+    if (session.nextBlock) {
+      console.log('[refine] 画像变了，扔掉 prefetch 的 nextBlock');
+      session.nextBlock = null;
+    }
+    return result;
+  } catch (e) {
+    console.error('[refine] ❌ 失败', e);
+    broadcaster.send('refine_progress', { stage: 'error', detail: e.message });
+    return { ok: false, error: e.message };
+  } finally {
+    refineRunning = false;
+  }
+}
+
+/**
+ * 检查是否满足自动触发条件，满足就静默跑（不阻塞调用方）
+ * 每次追加 delta 之后调一下即可
+ */
+function maybeAutoRefine() {
+  if (refineRunning || bootstrapRunning) return;
+  shouldAutoTrigger(DATA_DIR).then((yes) => {
+    if (!yes) return;
+    if (refineRunning || bootstrapRunning) return;
+    console.log('[refine] 自动触发（新增 delta 达到阈值）');
+    runRefine({ silent: false }).catch((e) => console.error('[refine] auto fail', e));
+  }).catch((e) => console.warn('[refine] 自动触发检查失败:', e.message));
+}
+
 /**
  * @param {*} sender
  * @param {string} userIntent  用户额外要求
@@ -555,6 +633,7 @@ async function generateAndSend(sender, userIntent = '', replace = false) {
     if (plan.taste_delta) {
       console.log(`[block #${seq}] 写入 taste-delta: ${plan.taste_delta}`);
       await store.appendTasteDelta(plan.taste_delta, 'dj');
+      maybeAutoRefine();
     }
 
     sender.send('status', { stage: 'resolving', silent });
@@ -882,6 +961,24 @@ async function handleClientMessage(msg, sender) {
             `[bootstrap] 完成 耗时 ${(result.durationMs / 1000).toFixed(1)}s, ` +
             `样本 ${result.sampleCount}/${result.uniqueCount}, taste.md ${result.rawLength} 字`
           );
+
+          // 推进 refine 游标到"当前"：冷启动/重置画像后，之前累积的 deltas
+          // 和 play_history 都属于"旧世界"的反馈，不应该再被合并到新画像上。
+          try {
+            const fs2 = await import('node:fs/promises');
+            let size = 0;
+            try {
+              size = (await fs2.stat(path.join(DATA_DIR, 'taste-deltas.md'))).size;
+            } catch { /* 没文件 = 0 */ }
+            kvSet('refine:last_delta_offset', size);
+            const maxRow = getDB().prepare('SELECT MAX(id) AS m FROM play_history').get();
+            kvSet('refine:last_play_id', maxRow?.m || 0);
+            kvSet('refine:last_run_at', new Date().toISOString());
+            console.log(`[bootstrap] refine 游标推到当前：delta@${size}B, play@${maxRow?.m || 0}`);
+          } catch (e) {
+            console.warn('[bootstrap] 推进 refine 游标失败（非致命）:', e.message);
+          }
+
           broadcaster.send('bootstrap_done', {
             tastePath: result.tastePath,
             durationMs: result.durationMs,
@@ -923,6 +1020,7 @@ async function handleClientMessage(msg, sender) {
         const deltaText = `${verb}：${result.title} - ${result.artist}`;
         await store.appendTasteDelta(deltaText, 'rating');
         console.log(`[rate] ${deltaText} → taste-deltas`);
+        maybeAutoRefine();
       } else if (rating === null && result.prev) {
         console.log(`[rate] 取消 ${result.prev}: ${result.title} - ${result.artist}（不回写 delta）`);
       }
@@ -946,6 +1044,7 @@ async function handleClientMessage(msg, sender) {
         const deltaText = `${verb}：${title} - ${artist}`;
         await store.appendTasteDelta(deltaText, 'rating');
         console.log(`[rate_current] ${deltaText} → taste-deltas`);
+        maybeAutoRefine();
       } else if (rating === null && result.prev) {
         console.log(`[rate_current] 取消 ${result.prev}: ${title} - ${artist}`);
       }
@@ -1012,6 +1111,7 @@ async function handleClientMessage(msg, sender) {
       if (r.taste_delta) {
         await store.appendTasteDelta(r.taste_delta, 'chat');
         console.log(`[chat] taste-delta 写入: ${r.taste_delta}`);
+        maybeAutoRefine();
       }
 
       // 3. 是否需要重排下一段
@@ -1099,6 +1199,57 @@ async function handleClientMessage(msg, sender) {
     case 'qr_login_cancel': {
       // 前端关闭弹窗 → 停止当前轮询
       cancelQrLogin();
+      break;
+    }
+
+    case 'refine_status': {
+      // 前端查询：当前有多少增量、阈值多少、上次跑的时间
+      try {
+        const s = await countPendingSignals(DATA_DIR);
+        sender.send('refine_status', {
+          newDeltaCount: s.newDeltaCount,
+          newPlayCount: s.newPlayCount,
+          threshold: s.threshold,
+          lastRunAt: s.lastRunAt,
+          running: refineRunning,
+        });
+      } catch (e) {
+        sender.send('refine_status', { error: e.message });
+      }
+      break;
+    }
+
+    case 'refine_set_threshold': {
+      // 前端改阈值
+      const n = Number(data?.threshold);
+      if (!Number.isFinite(n)) {
+        sender.send('refine_status', { error: '阈值必须是数字' });
+        break;
+      }
+      const applied = setRefineThreshold(n);
+      console.log(`[refine] 阈值更新 → ${applied}`);
+      // 回推最新状态
+      const s = await countPendingSignals(DATA_DIR);
+      sender.send('refine_status', {
+        newDeltaCount: s.newDeltaCount,
+        newPlayCount: s.newPlayCount,
+        threshold: applied,
+        lastRunAt: s.lastRunAt,
+        running: refineRunning,
+      });
+      break;
+    }
+
+    case 'refine_start': {
+      // 用户手动触发
+      if (refineRunning) {
+        sender.send('refine_progress', { stage: 'error', detail: '已经在压实，等完成' });
+        break;
+      }
+      // 异步跑，不阻塞消息 loop
+      runRefine({ silent: false }).catch((e) =>
+        console.error('[refine] manual fail', e)
+      );
       break;
     }
 

@@ -127,7 +127,8 @@ my-claudio/                ← 你 git clone 下来的目录
 └── data/                      ← ⚠️ 不在 repo 里，运行时自动生成
     ├── vox.db                 ← SQLite：播放历史、对话、缓存
     ├── taste.md               ← 你的音乐人格画像
-    ├── taste-deltas.md        ← 画像演化追加日志
+    ├── taste-deltas.md        ← 画像演化追加日志（待合并信号）
+    ├── taste-deltas/          ← 压实后归档（archive-YYYY-MM.md）
     ├── qq_cookie.json         ← QQ 音乐模式：cookie
     └── netease_cookie.txt     ← 网易云模式：cookie（扫码登录后自动生成）
 ```
@@ -197,7 +198,9 @@ my-claudio/                ← 你 git clone 下来的目录
 
 > 💡 第一次启动时，跑 `npm run setup:brain` 会自动检测你装了哪些 CLI、让你选并写入配置。
 >
-> 💡 画像不准或想换歌单？随时点右上角 **✦** RESET TASTE 按钮重来。
+> 💡 画像不准或想换歌单？随时点右上角 **♻** RESET TASTE 按钮重来。
+>
+> 💡 积累了一段时间的点赞/跳过/对话反馈后，点右上角 **⟳** REFINE TASTE 把这些信号**合并进画像**——画像越用越贴，每次选歌的 prompt 也会更小、更准。默认每积攒 30 条新反馈自动触发一次，也可以在 Modal 里调阈值。
 
 ---
 

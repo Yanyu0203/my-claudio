@@ -1114,6 +1114,67 @@
     font-size: 11px; color: var(--fg-dim);
   }
 
+  /* Refine (画像压实) */
+  .refine-btn.has-pending {
+    animation: refinePulse 1.8s ease-in-out infinite;
+    color: var(--neon-pri);
+    text-shadow: 0 0 10px var(--neon-pri);
+  }
+  @keyframes refinePulse {
+    0%, 100% { opacity: 0.9; transform: scale(1); }
+    50% { opacity: 1; transform: scale(1.15); }
+  }
+  .refine-status-box {
+    margin: 16px 20px;
+    padding: 14px 16px;
+    background: color-mix(in srgb, var(--fg) 4%, transparent);
+    border: 1px solid color-mix(in srgb, var(--neon-pri) 20%, transparent);
+    border-radius: 6px;
+  }
+  .refine-row {
+    display: flex; justify-content: space-between; align-items: center;
+    padding: 6px 0;
+    font-size: 12px;
+    border-bottom: 1px dashed color-mix(in srgb, var(--fg-dim) 25%, transparent);
+  }
+  .refine-row:last-child { border-bottom: none; }
+  .refine-label { color: var(--fg-dim); }
+  .refine-value {
+    color: var(--fg);
+    font-family: var(--mono, monospace);
+    display: flex; align-items: center; gap: 8px;
+  }
+  .refine-value.count-hit { color: var(--neon-pri); font-weight: 700; }
+  .refine-threshold-input {
+    width: 70px;
+    padding: 4px 8px;
+    background: transparent;
+    border: 1px solid color-mix(in srgb, var(--fg-dim) 50%, transparent);
+    color: var(--fg);
+    font-family: inherit;
+    text-align: right;
+    border-radius: 3px;
+  }
+  .refine-threshold-input:focus {
+    outline: none;
+    border-color: var(--neon-pri);
+  }
+  .btn.mini {
+    font-size: 10px;
+    padding: 4px 10px;
+  }
+  .refine-changelog {
+    background: color-mix(in srgb, var(--fg) 3%, transparent);
+    border-left: 2px solid var(--neon-pri);
+    padding: 12px 16px;
+    font-size: 12px;
+    color: var(--fg);
+    line-height: 1.7;
+    white-space: pre-wrap;
+    max-height: 260px;
+    overflow-y: auto;
+  }
+
   /* 进度视图 */
   .bootstrap-progress-wrap {
     padding: 30px 24px 20px;
@@ -1312,6 +1373,7 @@
       <div id="status" class="">SYS // CONNECTING</div>
       <div>
         <span id="weatherInfo" class="weather"></span>
+        <span id="refineTasteBtn" class="theme-switch refine-btn" data-tip="合并最近反馈，演化画像">⟳</span>
         <span id="resetTasteBtn" class="theme-switch" data-tip="重新生成音乐画像">♻</span>
         <span id="historyBtn" class="theme-switch" data-tip="播放历史 / 给歌打分 ♥ ✕">⏱</span>
         <span id="themeSwitch" class="theme-switch" data-tip="切换界面主题">⚙</span>
@@ -1507,6 +1569,79 @@
         <div style="font-size: 16px; color: var(--fg); margin-bottom: 8px;">画像生成完毕</div>
         <div id="bootstrapDoneDetail" style="font-size: 11px; color: var(--fg-dim); margin-bottom: 24px;"></div>
         <button id="bootstrapDoneBtn" class="btn primary">刷新页面开始使用新画像</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- 画像压实 (Refine Taste) Modal -->
+<div id="refineModal" class="history-modal">
+  <div class="history-backdrop"></div>
+  <div class="history-panel bootstrap-panel">
+    <div class="history-head">
+      <div class="history-title">REFINE TASTE // 演化画像</div>
+      <button id="refineClose" class="history-close" title="关闭">✕</button>
+    </div>
+
+    <!-- Step 1: 状态 + 触发 -->
+    <div id="refineStepStatus" class="bootstrap-step">
+      <div class="history-sub">
+        把最近的点赞/跳过/对话偏好，**合并进**你的画像 taste.md。<br>
+        <span style="color: var(--fg-dim)">
+          这一步不会抹掉你的画像，只是让它"与时俱进"。合并后每个 block 的 prompt 会更小、推荐也更准。
+        </span>
+      </div>
+
+      <div class="refine-status-box">
+        <div class="refine-row">
+          <span class="refine-label">待合并 delta</span>
+          <span class="refine-value" id="refineDeltaCount">-</span>
+        </div>
+        <div class="refine-row">
+          <span class="refine-label">待合并播放记录</span>
+          <span class="refine-value" id="refinePlayCount">-</span>
+        </div>
+        <div class="refine-row">
+          <span class="refine-label">自动触发阈值 (delta 条数)</span>
+          <span class="refine-value">
+            <input type="number" id="refineThresholdInput" class="refine-threshold-input"
+                   min="5" max="500" step="1" />
+            <button id="refineThresholdSave" class="btn mini">保存</button>
+          </span>
+        </div>
+        <div class="refine-row">
+          <span class="refine-label">上次压实时间</span>
+          <span class="refine-value" id="refineLastRunAt" style="color: var(--fg-dim)">-</span>
+        </div>
+      </div>
+
+      <div class="bootstrap-actions">
+        <div id="refineHint" class="bootstrap-stats"></div>
+        <button id="refineGoBtn" class="btn primary">立即压实</button>
+      </div>
+    </div>
+
+    <!-- Step 2: 进度 -->
+    <div id="refineStepProgress" class="bootstrap-step" style="display: none;">
+      <div class="bootstrap-progress-wrap">
+        <div class="bootstrap-stage" id="refineStage">STARTING</div>
+        <div class="bootstrap-bar">
+          <div class="bootstrap-bar-fill" id="refineBarFill"></div>
+        </div>
+        <div class="bootstrap-detail" id="refineDetail">准备中...</div>
+        <div class="bootstrap-log" id="refineLog"></div>
+      </div>
+    </div>
+
+    <!-- Step 3: 完成 -->
+    <div id="refineStepDone" class="bootstrap-step" style="display: none;">
+      <div style="padding: 20px;">
+        <div style="text-align: center; font-size: 32px; color: var(--neon-pri); text-shadow: 0 0 20px var(--neon-pri); margin-bottom: 12px;">✦</div>
+        <div style="text-align: center; font-size: 15px; color: var(--fg); margin-bottom: 20px;">画像已演化</div>
+        <div id="refineChangelog" class="refine-changelog"></div>
+        <div style="text-align: center; margin-top: 20px;">
+          <button id="refineDoneBtn" class="btn primary">完成</button>
+        </div>
       </div>
     </div>
   </div>
