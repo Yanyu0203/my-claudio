@@ -55,6 +55,9 @@
  * 可选：扫码登录（目前只有 netease 实现；qq 不支持）
  * @property {() => Promise<{key: string, qrDataUrl: string}>} [startQrLogin]
  * @property {(key: string) => Promise<{status: 'waiting'|'scanned'|'confirmed'|'expired', cookie?: string, nickname?: string, userId?: string}>} [checkQrLogin]
+ *
+ * 可选：重启后端服务（目前只有 qq 实现；netease 不需要，因为没有独立服务）
+ * @property {(opts?: {qqMusicDir?: string, cookieFilePath?: string, logFile?: string}) => Promise<{ok: boolean, error?: string}>} [restartBackend]
  */
 
 import { createQQProvider } from './qq.js';

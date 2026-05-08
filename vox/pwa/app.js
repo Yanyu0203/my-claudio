@@ -292,6 +292,9 @@ function handleServer({ type, data }) {
     case 'qq_cookie_update_result':
       handleQQCookieUpdateResult(data);
       break;
+    case 'qq_cookie_update_progress':
+      handleQQCookieUpdateProgress(data);
+      break;
     case 'qr_login_qr':
       handleQrLoginQr(data);
       break;
@@ -1683,6 +1686,15 @@ function handleQrLoginFailed(data) {
   if (box) {
     box.innerHTML = '<button id="qrLoginStart" class="btn">重新生成二维码</button>';
     $('qrLoginStart')?.addEventListener('click', startQrLogin);
+  }
+}
+
+function handleQQCookieUpdateProgress(evt) {
+  const msg = $('qqAuthMsg');
+  if (!msg) return;
+  if (evt?.stage === 'restarting_backend') {
+    msg.textContent = '🔄 正在重启 QQ 音乐服务，让新 cookie 彻底生效…（5-10 秒）';
+    msg.className = 'qqauth-msg';
   }
 }
 

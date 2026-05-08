@@ -1014,13 +1014,36 @@ async function handleClientMessage(msg, sender) {
         cookieString: raw,
         dataDir: DATA_DIR,
       });
-      sender.send('qq_cookie_update_result', result);
       if (result.ok) {
         console.log('[qqauth] cookie 更新成功，可以重新生成 block');
-        authFailWindow.length = 0; // 清掉旧窗口，给新 cookie 一个干净起点
+        authFailWindow.length = 0;
+
+        // QQ 源额外一步：重启 QQMusicApi，彻底刷新 cookie 派生的签名缓存
+        // （不重启的话 QQMusicApi 内部可能还用老 g_tk 等字段，表现为推成功但实际 301）
+        if (music.kind === 'qq' && typeof music.restartBackend === 'function') {
+          sender.send('qq_cookie_update_progress', { stage: 'restarting_backend' });
+          console.log('[qqauth] 重启 QQMusicApi 以彻底刷新 cookie 缓存...');
+          const qqMusicDir = process.env.QQMUSIC_DIR
+            || path.resolve(__dirname, '..', 'QQMusicApi');
+          const cookieFilePath = path.join(DATA_DIR, 'qq_cookie.json');
+          const logFile = path.resolve(__dirname, '..', 'logs', 'qqmusicapi.log');
+          const r2 = await music.restartBackend({ qqMusicDir, cookieFilePath, logFile });
+          if (!r2.ok) {
+            console.warn('[qqauth] 重启 QQMusicApi 失败:', r2.error);
+            sender.send('qq_cookie_update_result', {
+              ok: false,
+              error: `cookie 已写入，但重启 QQMusicApi 失败：${r2.error}。手动重启 Vox 即可。`,
+            });
+            break;
+          }
+          console.log('[qqauth] ✅ QQMusicApi 重启完成，cookie 生效');
+        }
+
+        sender.send('qq_cookie_update_result', result);
         // 让前端自行决定要不要立刻触发 request_block
       } else {
         console.warn('[qqauth] cookie 更新失败:', result.error);
+        sender.send('qq_cookie_update_result', result);
       }
       break;
     }

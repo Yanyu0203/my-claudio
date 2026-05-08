@@ -93,30 +93,26 @@ if [ "$MUSIC_PROVIDER" = "qq" ]; then
       ;;
   esac
 
-  # 启动 QQMusicApi
-  if ! curl -sf -o /dev/null "http://127.0.0.1:3300" 2>/dev/null; then
-    if [ ! -d "$QQMUSIC_DIR" ]; then
-      echo "❌ 找不到 QQMusicApi 目录: $QQMUSIC_DIR"
-      echo "   仓库里正常自带；如果缺失："
-      echo "     git clone https://github.com/jsososo/QQMusicApi.git"
-      echo "     cd QQMusicApi && npm install"
-      exit 1
-    fi
-    if [ ! -d "$QQMUSIC_DIR/node_modules" ]; then
-      echo "[vox] QQMusicApi 首次使用，自动装依赖..."
-      (cd "$QQMUSIC_DIR" && npm install --silent) || {
-        echo "❌ QQMusicApi 装依赖失败"; exit 1
-      }
-    fi
-    echo "[vox] 启动 QQMusicApi (QQ=$QQ_UIN) ..."
-    (cd "$QQMUSIC_DIR" && QQ="$QQ_UIN" yarn start > "$LOG_DIR/qqmusicapi.log" 2>&1) &
-    for i in {1..20}; do
-      if curl -sf -o /dev/null "http://127.0.0.1:3300"; then break; fi
-      sleep 0.5
-    done
-  else
-    echo "[vox] QQMusicApi 已在运行"
+  # 启动 QQMusicApi（前面 pkill 已经杀了，这里总是冷启动，避免"活进程 cookie 缓存脏"）
+  if [ ! -d "$QQMUSIC_DIR" ]; then
+    echo "❌ 找不到 QQMusicApi 目录: $QQMUSIC_DIR"
+    echo "   仓库里正常自带；如果缺失："
+    echo "     git clone https://github.com/jsososo/QQMusicApi.git"
+    echo "     cd QQMusicApi && npm install"
+    exit 1
   fi
+  if [ ! -d "$QQMUSIC_DIR/node_modules" ]; then
+    echo "[vox] QQMusicApi 首次使用，自动装依赖..."
+    (cd "$QQMUSIC_DIR" && npm install --silent) || {
+      echo "❌ QQMusicApi 装依赖失败"; exit 1
+    }
+  fi
+  echo "[vox] 启动 QQMusicApi (QQ=$QQ_UIN) ..."
+  (cd "$QQMUSIC_DIR" && QQ="$QQ_UIN" yarn start > "$LOG_DIR/qqmusicapi.log" 2>&1) &
+  for i in {1..20}; do
+    if curl -sf -o /dev/null "http://127.0.0.1:3300"; then break; fi
+    sleep 0.5
+  done
 
   # 每次启动都重推 cookie（cookie 可能更新 / 重启后进程内 cookie 也要重推）
   if [ -f "$QQ_COOKIE_FILE" ]; then
@@ -125,7 +121,24 @@ if [ "$MUSIC_PROVIDER" = "qq" ]; then
       -H "Content-Type: application/json" \
       -d @"$QQ_COOKIE_FILE")
     if echo "$RESP" | grep -q '"result":100'; then
-      echo "[vox] cookie 推送成功"
+      echo "[vox] cookie 已推送（注意：此时只表示接收成功，未验证登录态）"
+      # 真·鉴权验证：调 /user/songlist 看是否登录
+      # （/user/detail 在 QQMusicApi 这个库里经常假阳性 301，不要用它）
+      DETAIL=$(curl -s --max-time 8 "http://127.0.0.1:3300/user/songlist?id=${QQ_UIN}" 2>/dev/null)
+      if echo "$DETAIL" | grep -q '"result":100'; then
+        echo "[vox] ✅ cookie 登录态验证通过"
+      elif echo "$DETAIL" | grep -q '"result":301'; then
+        echo ""
+        echo "[vox] ⚠️  cookie 已过期（未登录）！推送到 QQMusicApi 显示成功，但腾讯后端判定 301=未登录"
+        echo "[vox]    解决方案："
+        echo "[vox]      1. 浏览器打开 https://y.qq.com 确保右上角已登录你的账号"
+        echo "[vox]      2. F12 → Application → Cookies → y.qq.com，复制所有 cookie"
+        echo "[vox]      3. 打开 Vox 网页（还会继续启动），从弹窗里粘贴新 cookie"
+        echo "[vox]    （或者直接改用网易云扫码：删 vox/.env 的 MUSIC_PROVIDER 那行重启）"
+        echo ""
+      else
+        echo "[vox] ⚠️  cookie 验证返回未知响应（继续启动，可能只能播非 VIP）：$(echo "$DETAIL" | head -c 160)"
+      fi
     else
       echo "[vox] ⚠️  cookie 推送响应异常: $RESP"
       echo "[vox]    （继续启动，但可能只能播非 VIP 歌曲）"

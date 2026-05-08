@@ -112,32 +112,28 @@ if ($Provider -eq 'qq') {
         }
     }
 
-    # 启动 QQMusicApi
-    if (-not (Test-Port 3300)) {
-        if (-not (Test-Path $QQMusicDir)) {
-            Write-Host "❌ 找不到 QQMusicApi 目录: $QQMusicDir" -ForegroundColor Red
-            exit 1
-        }
-        if (-not (Test-Path (Join-Path $QQMusicDir "node_modules"))) {
-            Write-Host "[vox] QQMusicApi 首次使用，自动装依赖..." -ForegroundColor Cyan
-            Push-Location $QQMusicDir
-            try { npm install --silent; if ($LASTEXITCODE -ne 0) { throw "npm install failed" } }
-            finally { Pop-Location }
-        }
-        Write-Host "[vox] 启动 QQMusicApi (QQ=$QQUin) ..." -ForegroundColor Cyan
-        $env:QQ = $QQUin
-        Start-Process -FilePath "cmd.exe" `
-            -ArgumentList "/c", "cd /d `"$QQMusicDir`" && yarn start > `"$LogDir\qqmusicapi.log`" 2>&1" `
-            -WindowStyle Hidden
-        for ($i = 0; $i -lt 20; $i++) {
-            if (Test-Port 3300) { break }
-            Start-Sleep -Milliseconds 500
-        }
-    } else {
-        Write-Host "[vox] QQMusicApi 已在运行" -ForegroundColor Green
+    # 启动 QQMusicApi（前面清理老进程已经杀了，这里总是冷启动避免 cookie 缓存脏）
+    if (-not (Test-Path $QQMusicDir)) {
+        Write-Host "❌ 找不到 QQMusicApi 目录: $QQMusicDir" -ForegroundColor Red
+        exit 1
+    }
+    if (-not (Test-Path (Join-Path $QQMusicDir "node_modules"))) {
+        Write-Host "[vox] QQMusicApi 首次使用，自动装依赖..." -ForegroundColor Cyan
+        Push-Location $QQMusicDir
+        try { npm install --silent; if ($LASTEXITCODE -ne 0) { throw "npm install failed" } }
+        finally { Pop-Location }
+    }
+    Write-Host "[vox] 启动 QQMusicApi (QQ=$QQUin) ..." -ForegroundColor Cyan
+    $env:QQ = $QQUin
+    Start-Process -FilePath "cmd.exe" `
+        -ArgumentList "/c", "cd /d `"$QQMusicDir`" && yarn start > `"$LogDir\qqmusicapi.log`" 2>&1" `
+        -WindowStyle Hidden
+    for ($i = 0; $i -lt 20; $i++) {
+        if (Test-Port 3300) { break }
+        Start-Sleep -Milliseconds 500
     }
 
-    # 推 cookie
+    # 推 cookie + 真·鉴权验证（setCookie 100 ≠ 登录有效）
     if (Test-Path $QQCookieFile) {
         Write-Host "[vox] 推送 cookie 到 QQMusicApi..." -ForegroundColor Cyan
         try {
@@ -145,7 +141,24 @@ if ($Provider -eq 'qq') {
                 -Method POST -ContentType "application/json" `
                 -InFile $QQCookieFile
             if ($resp.result -eq 100) {
-                Write-Host "[vox] cookie 推送成功" -ForegroundColor Green
+                Write-Host "[vox] cookie 已推送（注意：此时只表示接收成功，未验证登录态）" -ForegroundColor Cyan
+                try {
+                    $detail = Invoke-RestMethod -Uri "http://127.0.0.1:3300/user/songlist?id=$QQUin" -TimeoutSec 8
+                    if ($detail.result -eq 100) {
+                        Write-Host "[vox] ✅ cookie 登录态验证通过" -ForegroundColor Green
+                    } elseif ($detail.result -eq 301) {
+                        Write-Host ""
+                        Write-Host "[vox] ⚠️  cookie 已过期（未登录）！推送显示成功，但腾讯后端判定 301=未登录" -ForegroundColor Yellow
+                        Write-Host "[vox]    解决方案：" -ForegroundColor Yellow
+                        Write-Host "[vox]      1. 浏览器打开 https://y.qq.com 确保右上角已登录你的账号"
+                        Write-Host "[vox]      2. F12 → Application → Cookies → y.qq.com，复制所有 cookie"
+                        Write-Host "[vox]      3. 打开 Vox 网页（还会继续启动），从弹窗里粘贴新 cookie"
+                        Write-Host "[vox]    （或者直接改用网易云扫码：删 vox\.env 的 MUSIC_PROVIDER 那行重启）"
+                        Write-Host ""
+                    } else {
+                        Write-Host "[vox] ⚠️  cookie 验证返回未知响应（继续启动，可能只能播非 VIP）" -ForegroundColor Yellow
+                    }
+                } catch { Write-Host "[vox] cookie 验证请求失败: $_" -ForegroundColor Yellow }
             } else {
                 Write-Host "[vox] ⚠️  cookie 推送响应异常" -ForegroundColor Yellow
             }

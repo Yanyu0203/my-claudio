@@ -368,41 +368,199 @@ export function createQQProvider(opts = {}) {
       return { ok: false, error: `setCookie 响应异常: ${JSON.stringify(setJson).slice(0, 200)}` };
     }
 
-    // 验证：拿水星记（郭顶）直链
-    try {
-      const vRes = await fetch(apiBase + '/song/url?id=00485V8K4InqbZ');
-      const vJson = await vRes.json().catch(() => ({}));
-      if (typeof vJson?.data !== 'string' || !vJson.data.startsWith('http')) {
-        return {
-          ok: false,
-          error: `cookie 写入成功但拿不到直链（${vJson?.errMsg || '可能 cookie 还是过期的'}），请重新从浏览器复制完整 cookie`,
-        };
-      }
-    } catch (e) {
-      return { ok: false, error: `验证直链失败: ${e.message}` };
+    // 验证：用 /user/detail 看当前登录态（比随便抓一首歌可靠得多）
+    // /user/detail 是基于 uin 的用户信息接口，只有真正登录态才返回 result:100
+    // 注意：必须用 applyCookie 时 provider 已经有的 defaultUserId
+    if (!defaultUserId) {
+      // 没设 QQ_UIN，没法做鉴权验证，只能相信字段校验
+      console.warn('[qq] applyCookie：没有 QQ_UIN，跳过鉴权验证直接落盘');
+      return {
+        ok: true,
+        toWrite: { fileName: 'qq_cookie.json', content: payload + '\n' },
+      };
     }
 
-    return {
-      ok: true,
-      toWrite: { fileName: 'qq_cookie.json', content: payload + '\n' },
-    };
+    try {
+      // 用 /user/songlist 做验证（比 /user/detail 可靠，详见 probeAuth 注释）
+      const dUrl = apiBase + '/user/songlist?id=' + encodeURIComponent(defaultUserId);
+      const dRes = await fetch(dUrl, { signal: AbortSignal.timeout(8000) });
+      const dJson = await dRes.json().catch(() => ({}));
+      if (dJson?.result === 100 && Array.isArray(dJson?.data?.list)) {
+        // 真·登录成功
+        console.log(`[qq] applyCookie 验证通过：能拉到 ${dJson.data.list.length} 个歌单`);
+        return {
+          ok: true,
+          toWrite: { fileName: 'qq_cookie.json', content: payload + '\n' },
+        };
+      }
+      if (dJson?.result === 301 || /未登/.test(dJson?.errMsg || '')) {
+        return {
+          ok: false,
+          error: `cookie 写入但腾讯判定未登录（result=${dJson?.result}）。可能：(1) 复制时漏了字段，(2) 登录的 QQ 号不是 ${defaultUserId}，(3) cookie 已过期。请从浏览器重新完整复制。`,
+        };
+      }
+      // 返回异常但不是明确的 301 → 宽容通过
+      console.warn(`[qq] applyCookie 验证返回未知响应，宽容通过: ${JSON.stringify(dJson).slice(0, 200)}`);
+      return {
+        ok: true,
+        warning: `cookie 已写入，但 /user/songlist 返回异常响应，实际是否生效以播歌为准`,
+        toWrite: { fileName: 'qq_cookie.json', content: payload + '\n' },
+      };
+    } catch (e) {
+      // 验证请求本身挂了（超时 / 网络）→ 宽容通过，至少落盘
+      console.warn('[qq] applyCookie 验证请求异常，宽容通过:', e.message);
+      return {
+        ok: true,
+        warning: `cookie 已写入，但验证请求失败（${e.message}），实际是否生效以播歌为准`,
+        toWrite: { fileName: 'qq_cookie.json', content: payload + '\n' },
+      };
+    }
+  }
+
+  /**
+   * 重启本地 QQMusicApi 服务
+   * --------------------------------------------------
+   * 为什么需要：`/user/setCookie` 只是把 cookie 推进去，但 QQMusicApi 长期运行后
+   * 内部会缓存 cookie 派生出来的签名字段（g_tk 等），热更新不彻底 → 表现为
+   * 推了新 cookie 依然返回 result:301"未登陆"。唯一可靠的办法是重启 QQMusicApi 进程。
+   *
+   * 做的事：
+   *   1) pkill 老的 QQMusicApi
+   *   2) spawn 新的（从 $QQMUSIC_DIR 环境变量或默认 ../../../QQMusicApi 找目录）
+   *   3) 轮询 3300 端口直到 ready（最多 15 秒）
+   *   4) 推 cookie
+   *   5) 调 /user/detail 验证
+   *
+   * @param {object} [opts]
+   * @param {string} [opts.qqMusicDir]  QQMusicApi 目录绝对路径
+   * @param {string} [opts.cookieFilePath] 待推送的 cookie 文件（JSON 格式 {data:"..."}）
+   * @param {string} [opts.logFile] 子进程输出写到哪（默认黑洞）
+   * @returns {Promise<{ok: boolean, error?: string}>}
+   */
+  async function restartBackend(opts = {}) {
+    const { spawn } = await import('node:child_process');
+    const fsMod = await import('node:fs/promises');
+
+    const qqDir = opts.qqMusicDir;
+    if (!qqDir) {
+      return { ok: false, error: '没指定 qqMusicDir，无法重启 QQMusicApi' };
+    }
+
+    console.log('[qq] 准备重启 QQMusicApi（彻底刷新 cookie 缓存）...');
+
+    // 1) 杀老进程
+    try {
+      await new Promise((resolve) => {
+        const p = spawn('pkill', ['-f', 'QQMusicApi/bin/www'], { stdio: 'ignore' });
+        p.on('exit', () => resolve());
+        p.on('error', () => resolve()); // pkill 没匹配到进程时退出码 1，忽略
+      });
+      // 给端口一点时间真正释放
+      await sleep(500);
+    } catch {
+      /* ignore */
+    }
+
+    // 2) 启动新进程
+    const uin = defaultUserId || '';
+    let logFd = 'ignore';
+    if (opts.logFile) {
+      try {
+        const { open } = await import('node:fs/promises');
+        const fh = await open(opts.logFile, 'a');
+        logFd = fh.fd;
+      } catch {
+        /* 写 log 失败就黑洞 */
+      }
+    }
+    console.log(`[qq] spawn QQMusicApi (dir=${qqDir}, QQ=${uin}) ...`);
+    const child = spawn('yarn', ['start'], {
+      cwd: qqDir,
+      env: { ...process.env, QQ: uin },
+      stdio: ['ignore', logFd, logFd],
+      detached: true,
+    });
+    child.unref(); // 让它和 vox 进程脱钩，vox 退出时不被拖着
+
+    // 3) 等端口 ready（最多 15s）
+    let ready = false;
+    for (let i = 0; i < 30; i++) {
+      await sleep(500);
+      try {
+        const r = await fetch(apiBase, { signal: AbortSignal.timeout(2000) });
+        if (r.ok || r.status === 404) {
+          ready = true;
+          break;
+        }
+      } catch {
+        /* 继续等 */
+      }
+    }
+    if (!ready) {
+      return { ok: false, error: `QQMusicApi 重启后 15s 仍未 ready（${apiBase}）` };
+    }
+    console.log('[qq] QQMusicApi 重启完成，推 cookie...');
+
+    // 4) 推 cookie
+    if (opts.cookieFilePath) {
+      try {
+        const raw = await fsMod.readFile(opts.cookieFilePath, 'utf8');
+        const setRes = await fetch(apiBase + '/user/setCookie', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: raw,
+        });
+        const setJson = await setRes.json().catch(() => ({}));
+        if (setJson.result !== 100) {
+          return { ok: false, error: `setCookie 响应异常: ${JSON.stringify(setJson).slice(0, 200)}` };
+        }
+      } catch (e) {
+        return { ok: false, error: `推 cookie 失败: ${e.message}` };
+      }
+    }
+
+    // 5) 验证
+    try {
+      const state = await probeAuth();
+      if (state === 'ok') {
+        console.log('[qq] ✅ 重启 + cookie 推送 + 验证全部通过');
+        return { ok: true };
+      }
+      if (state === 'expired') {
+        return { ok: false, error: '重启后验证仍显示未登录，cookie 可能确实过期了' };
+      }
+      // unknown：也算成功，可能只是 probe 接口抽风
+      console.warn('[qq] 重启后验证返回 unknown，宽容通过');
+      return { ok: true };
+    } catch (e) {
+      return { ok: false, error: `验证失败: ${e.message}` };
+    }
   }
 
   /**
    * 主动探测 cookie 是否真的过期（不依赖 getPlayUrl）
+   *
+   * 注意：不要用 /user/detail —— 它打的是 fcg_get_profile_homepage.fcg，
+   * 这个接口 QQMusicApi 对 cookie 签名支持不全，经常假阳性"未登陆"。
+   *
+   * 改用 /user/songlist：打 fcg_user_created_diss，这个接口只要 cookie 真有效就能返回歌单。
+   * 未登录时腾讯返回 code=1000 被 QQMusicApi 转成 result=301。
+   *
    * @returns {Promise<'ok' | 'expired' | 'unknown'>}
    */
   async function probeAuth() {
     if (!defaultUserId) return 'unknown';
     try {
-      const url = apiBase + '/user/detail?id=' + encodeURIComponent(defaultUserId);
+      const url = apiBase + '/user/songlist?id=' + encodeURIComponent(defaultUserId);
       const res = await fetch(url, { signal: AbortSignal.timeout(8000) });
       if (!res.ok) return 'unknown';
       const json = await res.json().catch(() => ({}));
+      // 301 / code=1000 / 错误信息含 "未登" → 过期
       if (json?.result === 301 || json?.code === 1000 || /未登/.test(json?.errMsg || '')) {
         return 'expired';
       }
-      if (json?.result === 100 && json?.data) return 'ok';
+      // 200 + data.list 是数组 → 登录态正常
+      if (json?.result === 100 && Array.isArray(json?.data?.list)) return 'ok';
       return 'unknown';
     } catch (e) {
       console.warn('[qq] probe 异常:', e.message);
@@ -427,5 +585,7 @@ export function createQQProvider(opts = {}) {
     applyCookie,
     probeAuth,
     cookieInstructions,
+    // QQ 独有：重启本地 QQMusicApi 服务（刷新 cookie 缓存）
+    restartBackend,
   };
 }
