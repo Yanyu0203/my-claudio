@@ -97,8 +97,41 @@ async function searchOne(music, p) {
     }
     if (!hits.length) continue;
 
-    const best =
-      hits.find((h) => looseMatchArtist(h.artist, p.artist)) || hits[0];
+    // 选最佳命中：核心原则是**绝不播试听版（时长 < 60s 的基本都是腾讯给的 30s 片段）**
+    //
+    // 优先级：
+    //   1) 歌手名匹配 且 时长 ≥ 60s             ← 最优
+    //   2) 歌手名不匹配 但 时长 ≥ 60s           ← 至少是完整版
+    //   3) 歌手名匹配但全是短版本，时长 ≥ 45s   ← 极个别真完整歌就是 45s 左右的 interlude
+    //   4) 无 ≥ 45s 候选                        ← 当作搜不到（看下面）
+    const FULL_THRESHOLD = 60;       // 主流阈值
+    const FALLBACK_THRESHOLD = 45;   // 允许的短歌下限（极少数 interlude）
+    const artistMatchFull = hits.find(
+      (h) => looseMatchArtist(h.artist, p.artist) && (h.duration || 0) >= FULL_THRESHOLD
+    );
+    const anyFullVersion = hits.find((h) => (h.duration || 0) >= FULL_THRESHOLD);
+    const artistMatchShort = hits.find(
+      (h) => looseMatchArtist(h.artist, p.artist) && (h.duration || 0) >= FALLBACK_THRESHOLD
+    );
+    const best = artistMatchFull || anyFullVersion || artistMatchShort;
+
+    if (!best) {
+      // 搜到了，但全是 <45s 的试听版 → 当作搜不到，让大脑下次换歌
+      const shortList = hits
+        .slice(0, 3)
+        .map((h) => `${h.title}(${h.duration || 0}s)`)
+        .join(', ');
+      console.warn(
+        `[resolver] "${p.title} - ${p.artist}" 全是试听版（${shortList}），放弃不播`
+      );
+      continue; // 试下一个 query 变体；最终 searchOne 返回 null
+    }
+
+    if ((best.duration || 0) < FULL_THRESHOLD) {
+      console.warn(
+        `[resolver] "${p.title} - ${p.artist}" 选到短版本（${best.duration}s），可能被试听截断`
+      );
+    }
 
     const metaItem = {
       title: best.title,
@@ -145,6 +178,21 @@ export async function fetchUrlFor(music, song) {
 
   const { url, authFail } = await music.getPlayUrl(song.songId);
   if (url) {
+    // 运行时验真：HEAD 看 Content-Length 是否和 meta 时长匹配
+    // 典型 128kbps mp3 每秒 16KB；30s 试听版 ≈ 481KB。
+    // 如果 meta 说这首歌 ≥ 60s，但实际 mp3 体积对应 < 35s → 大概率被腾讯发了试听版
+    if ((song.duration || 0) >= 60) {
+      const actual = await probeMp3Duration(url);
+      if (actual > 0 && actual < 35) {
+        console.warn(
+          `[resolver] "${song.title} - ${song.artist}" 直链疑似试听版：` +
+          `meta=${song.duration}s, 实际≈${actual}s。放弃此 mp3`
+        );
+        // 不缓存、不返回 url，让上层当拿不到直链处理
+        return { url: '', authFail: false };
+      }
+    }
+
     // 升级到"完整缓存"
     const full = {
       title: song.title,
@@ -210,4 +258,28 @@ function looseMatchArtist(a, b) {
     if (norm(part) === B) return true;
   }
   return false;
+}
+
+/**
+ * 通过 HEAD 请求的 Content-Length 反推 mp3 时长（粗略）。
+ * 假定 128kbps mp3，每秒 16KB。返回估算秒数；拿不到 Content-Length 返回 0。
+ *
+ * 用途：区分"完整歌"vs"30 秒试听版"。
+ *   - 30s 试听：约 480KB → 估算 30s
+ *   - 完整歌 3 分钟：约 2.8MB → 估算 180s
+ */
+async function probeMp3Duration(url) {
+  try {
+    const res = await fetch(url, {
+      method: 'HEAD',
+      signal: AbortSignal.timeout(4000),
+    });
+    if (!res.ok) return 0;
+    const len = Number(res.headers.get('content-length') || 0);
+    if (len <= 0) return 0;
+    // 128kbps = 16KB/s
+    return Math.round(len / 16000);
+  } catch {
+    return 0; // 网络异常就不拦截，让 mp3 自己说话
+  }
 }
