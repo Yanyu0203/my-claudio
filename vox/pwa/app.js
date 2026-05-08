@@ -624,28 +624,29 @@ audio.addEventListener('error', () => {
     return;
   }
 
-  // 重试一次
+  // 重试一次：让 server 强制刷新这首歌的直链（可能是 vkey 过期）
   errorRetryCount++;
-  console.log(`[audio error] ${1500 * errorRetryCount}ms 后重试 [${errorRetryCount}/${ERROR_RETRY_LIMIT}]`);
-  setStatus('NETWORK HICCUP // RETRY...', true);
+  console.log(`[audio error] 让 server 强刷直链后重试 [${errorRetryCount}/${ERROR_RETRY_LIMIT}]`);
+  setStatus('URL 过期 // 刷新中...', true);
+  // 先清掉当前 url，避免 ensureUrlAsync 的 "song.url 非空直接 return" 早退
+  const staleUrl = current.url;
+  current.url = '';
+  try { audio.removeAttribute('src'); audio.load(); } catch {}
+  // 把当前 idx 发给 server，带 force 让它丢缓存重拿
+  const idx = (window.__currentBlockSongs || 1) - queue.length - 1;
+  send('ensure_url', { idx: Math.max(0, idx), force: true });
+  // 等 song_url_ready（handleSongUrlReady 会帮你重新 audio.src + play）
+  // 8 秒兜底超时：没等到就当失败，进入下一首
   if (errorRetryTimer) clearTimeout(errorRetryTimer);
   errorRetryTimer = setTimeout(() => {
-    if (!current) return;
-    // 重新设 src 触发重新加载
-    const savedPos = audio.currentTime;
-    audio.src = current.url;
-    audio.play()
-      .then(() => {
-        // 尽量恢复到原位置
-        if (savedPos > 0) {
-          try { audio.currentTime = savedPos; } catch {}
-        }
-        setStatus('SYS // ONLINE', true);
-      })
-      .catch((e) => {
-        console.warn('[audio error] 重试 play 也失败', e);
-      });
-  }, 1500 * errorRetryCount);
+    errorRetryTimer = null;
+    if (current && !current.url && current.url !== staleUrl) {
+      console.warn('[audio error] 强刷直链超时，跳下一首');
+      errorRetryCount = 0;
+      pushSysLog(`"${current.title}" 直链刷新超时，跳过`);
+      playNext();
+    }
+  }, 8000);
 });
 
 // 成功播放一段时间后，重置重试计数（说明网络又好了）

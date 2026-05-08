@@ -18,15 +18,28 @@
  *     Netease 的 songId 是纯数字，混用会让 getPlayUrl 把别家的 id 当自家的查，必 fail）
  *   - 切 provider 后老缓存不会命中（key 前缀不同），会自然因 TTL 过期被清
  */
-import { cacheGet, cacheSet } from './db.js';
+import { cacheGet, cacheSet, cacheDelete } from './db.js';
 
-const CACHE_MS = 4 * 60 * 60 * 1000; // 4 小时
-const MISS_CACHE_MS = 5 * 60 * 1000; // 5 分钟
+// 缓存 TTL 分开：
+//   - URL 缓存（song_cache）短，因为 QQ vkey 实测 2-3h 就可能失效
+//   - meta 缓存（song_cache_meta）可以长，songId 基本不会变
+const URL_CACHE_MS = 90 * 60 * 1000;    // 1.5h（比 vkey 有效期短一些）
+const META_CACHE_MS = 4 * 60 * 60 * 1000; // 4 小时
+const MISS_CACHE_MS = 5 * 60 * 1000;     // 5 分钟
 
 /** 生成带 provider kind 前缀的缓存 key */
 function buildCacheKey(music, title, artist) {
   const kind = music?.kind || 'unknown';
   return `${kind}:${normKey(title)}|${normKey(artist)}`;
+}
+
+/**
+ * 清掉某首歌的"完整缓存"（带 url 那条），meta 缓存保留。
+ * 用于 vkey 过期后强制重新拿 url。
+ */
+export function invalidateSongUrlCache(music, title, artist) {
+  const key = buildCacheKey(music, title, artist);
+  return cacheDelete('song_cache', key);
 }
 
 // ============================================================
@@ -142,7 +155,7 @@ async function searchOne(music, p) {
       album: best.album,
       cover: best.cover || '',
     };
-    cacheSet('song_cache_meta', cacheKey, metaItem, CACHE_MS);
+    cacheSet('song_cache_meta', cacheKey, metaItem, META_CACHE_MS);
     return { ...metaItem, url: '' };
   }
 
@@ -204,7 +217,7 @@ export async function fetchUrlFor(music, song) {
       album: song.album,
       cover: song.cover || '',
     };
-    cacheSet('song_cache', cacheKey, full, CACHE_MS);
+    cacheSet('song_cache', cacheKey, full, URL_CACHE_MS);
     return { url, authFail: false };
   }
 

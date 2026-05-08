@@ -151,6 +151,12 @@ export function cacheSet(table, key, value, ttlMs) {
     .run(key, json, expires);
 }
 
+/** 主动删除某个缓存条目（比如 vkey 过期后要强刷） */
+export function cacheDelete(table, key) {
+  const col = table === 'weather_cache' ? 'location' : 'key';
+  return getDB().prepare(`DELETE FROM ${table} WHERE ${col} = ?`).run(key).changes;
+}
+
 /** 定期清理过期缓存（启动时调用一次即可） */
 export function purgeExpiredCache() {
   const now = Date.now();

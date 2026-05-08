@@ -16,7 +16,7 @@ import { Store } from './src/state.js';
 import { getDB, purgeExpiredCache, kvGet, kvSet } from './src/db.js';
 import { getWeather } from './src/weather.js';
 import { planNextBlock } from './src/bridge.js';
-import { searchAll, fetchUrlFor, prefetchUrls } from './src/resolver.js';
+import { searchAll, fetchUrlFor, prefetchUrls, invalidateSongUrlCache } from './src/resolver.js';
 import { classifyMessage, chatReply } from './src/chat.js';
 import { resolveBrainBin, getBrainFlavor } from './src/brain.js';
 import { bootstrapTaste } from './src/bootstrap.js';
@@ -749,9 +749,18 @@ async function handleClientMessage(msg, sender) {
 
     case 'ensure_url': {
       // 前端主动请求某一首的 url（懒加载）
-      // data: { idx: number }
+      // data: { idx: number, force?: boolean }
+      //   force=true: 强制刷新（比如 audio error 后怀疑 vkey 过期）
+      //     → 清掉 session 内的 url 和 song_cache 缓存，重新调 getPlayUrl
       const idx = Number(data?.idx);
+      const force = !!data?.force;
       if (Number.isInteger(idx)) {
+        if (force && session.currentBlock?.songs?.[idx]) {
+          const song = session.currentBlock.songs[idx];
+          console.log(`[ensure_url] 强制刷新 idx=${idx} ${song.title}（旧 url 疑似过期）`);
+          song.url = ''; // 清 session 里的 url，让 ensureUrlAsync 不 early-return
+          invalidateSongUrlCache(music, song.title, song.artist);
+        }
         ensureUrlAsync(session.currentBlock, idx);
       }
       break;

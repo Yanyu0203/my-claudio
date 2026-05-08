@@ -43,7 +43,7 @@ export function buildPrompt({
 
   const segHistory = recentPlays.length
     ? recentPlays
-        .slice(-15)
+        .slice(-40) // 最近 40 条，覆盖近 4 个 block；带评分/是否听完
         .map((p) => {
           const tag = p.rating === 'like' ? ' ♥喜欢'
             : p.rating === 'dislike' ? ' ✕不喜欢'
@@ -51,6 +51,30 @@ export function buildPrompt({
           return `- ${p.title} - ${p.artist}  ${p.played ? '✓听完' : '✗跳过'}${tag}`;
         })
         .join('\n')
+    : '（无）';
+
+  // ---------- 硬黑名单 ----------
+  // 用 Set 去重（同一首歌在 play_history 可能有多条：先"占位"再"played"事件）
+  // 窗口：最近 60 首 ≈ 6 个 block（之前给 30 首不够，实测 6 个 block 里同一首歌被推 3 次）
+  const blacklistSet = new Set();
+  const blacklistItems = [];
+  for (const p of recentPlays.slice(-60)) {
+    const key = `${p.title.trim()} - ${p.artist.trim()}`;
+    if (blacklistSet.has(key)) continue;
+    blacklistSet.add(key);
+    blacklistItems.push(`- ${key}`);
+  }
+  const segBlacklist = blacklistItems.length ? blacklistItems.join('\n') : '（无）';
+
+  // 最近 "听完且喜欢" 的（软黑名单 —— 给 AI 更强烈的信号，这些歌虽然用户爱但别重复喂）
+  const favoriteRecent = recentPlays
+    .slice(-100)
+    .filter((p) => p.played && (p.rating === 'like' || !p.rating)) // 听完了 + 没打差评
+    .map((p) => `${p.title.trim()} - ${p.artist.trim()}`);
+  // 去重
+  const favoriteUnique = [...new Set(favoriteRecent)];
+  const segFavoriteCooldown = favoriteUnique.length
+    ? favoriteUnique.slice(-40).map((s) => `- ${s}`).join('\n')
     : '（无）';
 
   const segMessages = recentMessages.length
@@ -79,17 +103,26 @@ ${segDeltas}
 # 当下环境
 ${segEnv}
 
-# 最近播过的歌（避免重复，且参考用户跳过的）
+# 最近播过的歌（参考用户反应：听完/跳过/评分）
 ${segHistory}
+
+# 🚫 硬禁止清单（最近 6 个 block，约 60 首，**绝对不能再出现**）
+这是你最近已经推给这个用户的歌。哪怕画像 / 对话 / 你自己的音乐感觉告诉你它多合适，也**必须全部排除**。用户体验：再好的歌连续听也会腻。
+${segBlacklist}
+
+# ⏱ 冷却期推荐（最近 40 首"听完没差评"的歌，本段尽量避开）
+这些是用户最近听完的/标过喜欢的。**即使它们已经滑出硬禁止清单，也请至少再隔 2-3 个 block 才考虑重推**。优先去推 TA 没听过的、风格匹配的**新**歌。
+${segFavoriteCooldown}
 
 # 最近对话
 ${segMessages}
 ${segIntent}
 # 选歌指南
-- **不要被画像里提过的歌手歌曲限死**，可以推荐画像里没出现但风格匹配的新歌（这才是主持人的价值）
-- 5 首歌之间要有"流"——不要五首风格大跳，想象力体现在曲序上
-- 优先 QQ 音乐能找到的曲目（华语/日语/韩语/英语主流都可以）
-- 避免和"最近播过的歌"重复
+- **主持人的价值是发现新歌**：不要被画像里提过的歌手歌曲限死，大量推荐画像里没出现但风格匹配的歌
+- **严禁重复**：硬禁止清单里的歌这段**一首都不能出现**；冷却期清单里的歌尽量不出现
+- 如果想致敬画像里提到的歌手 → 推 TA 的**别的歌**（不同专辑 / 不同年代 / 不同语种）
+- ${songsPerBlock} 首歌之间要有"流"——不要大跳，想象力体现在曲序上
+- 优先音乐源（QQ / 网易云）能找到的曲目（华语 / 日语 / 韩语 / 英语主流都可以）
 - 如果"最近对话"里用户表达了反馈/偏好，下一段必须体现
 
 # 关于 say 字段（开场白）

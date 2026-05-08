@@ -13,7 +13,7 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import { getDB } from './db.js';
 
-const HIST_RETURN_DEFAULT = 20;
+const HIST_RETURN_DEFAULT = 80;   // 给大脑的"最近播过"数量：80 首 ≈ 8 个 block
 const MSG_RETURN_DEFAULT = 6;
 
 export class Store {
