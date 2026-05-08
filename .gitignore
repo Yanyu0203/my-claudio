@@ -8,7 +8,8 @@ b*.jpg
 
 # 用户私人数据目录（含 cookie、播放历史、画像）—— 绝不入库
 # 新安装跑起来会自动重建；想分享口味画像可单独导出 taste.md
-data/
+# 前导 `/` = 只匹配仓库根目录的 data/，不影响 api-enhanced/data 等子仓库
+/data/
 
 # QQMusicApi 第三方依赖：代码进仓库，但忽略它的运行时产物
 # （node_modules 通过全局规则排除；data 含 cookie 必须排除；log/bak 脏数据清掉）
@@ -17,6 +18,10 @@ QQMusicApi/data/
 QQMusicApi/*.log
 QQMusicApi/*.bak
 QQMusicApi/.idea/
+
+# api-enhanced（网易云音乐 API）：用户首次跑 netease 模式时由 start.sh 自动 clone
+# 整个目录不入本仓库，避免和上游冲突 + 减小仓库体积
+api-enhanced/
 
 # 系统
 .DS_Store

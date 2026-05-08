@@ -33,9 +33,15 @@ const DEFAULT_STRATEGY = {
 };
 
 async function main() {
-  const music = createProvider(process.env.MUSIC_PROVIDER || 'qq', {
+  const PROVIDER = process.env.MUSIC_PROVIDER || 'qq';
+  const music = createProvider(PROVIDER, {
     apiBase: process.env.QQMUSIC_API_URL,
-    userId: process.env.QQ_UIN,
+    userId: PROVIDER === 'netease'
+      ? process.env.NETEASE_UID
+      : process.env.QQ_UIN,
+    cookieFile: PROVIDER === 'netease'
+      ? path.resolve(projectRoot, '..', 'data', 'netease_cookie.txt')
+      : undefined,
   });
 
   console.log('\n[1/2] 拉你的歌单列表...');

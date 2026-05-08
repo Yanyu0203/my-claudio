@@ -43,9 +43,22 @@
  * @property {(songId: string) => Promise<{url: string, authFail: boolean}>} getPlayUrl
  * @property {(userId?: string) => Promise<Array<Playlist>>} getMyPlaylists
  * @property {(playlistId: string|number) => Promise<PlaylistDetail>} getPlaylistSongs
+ * @property {(cookieString: string) => Promise<{
+ *     ok: boolean,
+ *     error?: string,
+ *     toWrite?: {fileName: string, content: string},
+ *     userInfo?: {nickname?: string, userId?: string},
+ *   }>} applyCookie
+ * @property {() => Promise<'ok' | 'expired' | 'unknown'>} probeAuth
+ * @property {{siteUrl: string, siteName: string, requiredFields: string[], extraNote?: string}} cookieInstructions
+ *
+ * 可选：扫码登录（目前只有 netease 实现；qq 不支持）
+ * @property {() => Promise<{key: string, qrDataUrl: string}>} [startQrLogin]
+ * @property {(key: string) => Promise<{status: 'waiting'|'scanned'|'confirmed'|'expired', cookie?: string, nickname?: string, userId?: string}>} [checkQrLogin]
  */
 
 import { createQQProvider } from './qq.js';
+import { createNeteaseProvider } from './netease.js';
 
 /**
  * @param {'qq' | 'netease'} kind
@@ -57,7 +70,7 @@ export function createProvider(kind, opts = {}) {
     case 'qq':
       return createQQProvider(opts);
     case 'netease':
-      throw new Error('netease provider 尚未实现，敬请期待');
+      return createNeteaseProvider(opts);
     default:
       throw new Error(`未知的 music provider: ${kind}（支持: qq / netease）`);
   }

@@ -1,7 +1,7 @@
 {
   "name": "vox",
-  "version": "0.1.0",
-  "description": "你的个人 AI 电台 · 跑在本地",
+  "version": "1.0.0",
+  "description": "你的个人 AI 电台 · 跑在本地 · 双音乐源（QQ / 网易云）",
   "type": "module",
   "private": true,
   "scripts": {
@@ -12,6 +12,7 @@
     "setup:cookie": "node scripts/setup-cookie.js",
     "setup:brain": "node scripts/setup-brain.js",
     "setup:qquin": "node scripts/setup-qquin.js",
+    "setup:provider": "node scripts/setup-provider.js",
     "qqmusic:start": "cross-env QQ=$npm_config_qq node ../QQMusicApi/bin/www"
   },
   "engines": {

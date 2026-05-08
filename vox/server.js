@@ -21,7 +21,7 @@ import { classifyMessage, chatReply } from './src/chat.js';
 import { resolveBrainBin, getBrainFlavor } from './src/brain.js';
 import { bootstrapTaste } from './src/bootstrap.js';
 import { promptAndWriteQQUin } from './scripts/setup-qquin.js';
-import { isPlaceholderUin } from './scripts/_lib/env-helper.js';
+import { isPlaceholderUin, upsertEnv } from './scripts/_lib/env-helper.js';
 import {
   isAuthRequired,
   getAuthReason,
@@ -30,7 +30,7 @@ import {
   probeCookieAlive,
   markAuthRequired,
   resetAuthFailSignals,
-} from './src/qqauth.js';
+} from './src/musicauth.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -50,9 +50,19 @@ const DATA_DIR = process.env.VOX_DATA_DIR || process.env.CLAUDIO_DATA_DIR
   ? path.resolve(process.env.VOX_DATA_DIR || process.env.CLAUDIO_DATA_DIR)
   : path.resolve(__dirname, '..', 'data');
 
+// ---------- 选择音乐源 ----------
+// 一般情况下走 start.sh / start.ps1，那里首次启动会让用户选并写进 .env
+// 直接 `node server.js` 且没设 MUSIC_PROVIDER 时 → 默认 qq（兼容老行为）
+const MUSIC_PROVIDER = (process.env.MUSIC_PROVIDER || 'qq').toLowerCase();
+if (MUSIC_PROVIDER !== 'qq' && MUSIC_PROVIDER !== 'netease') {
+  console.error(`❌ 不支持的 MUSIC_PROVIDER="${MUSIC_PROVIDER}"，支持: qq / netease`);
+  console.error(`   想切换？跑：cd vox && npm run setup:provider`);
+  process.exit(1);
+}
+
 // ---------- 启动前置检查 ----------
-// 1. QQ_UIN 没填？交互式问一下
-if (isPlaceholderUin(process.env.QQ_UIN)) {
+// QQ 源需要 QQ_UIN；Netease 源需要 NETEASE_UID
+if (MUSIC_PROVIDER === 'qq' && isPlaceholderUin(process.env.QQ_UIN)) {
   console.log('');
   console.log('⚠️  QQ_UIN 还没设置，先来填一下');
   await promptAndWriteQQUin();
@@ -62,15 +72,80 @@ if (isPlaceholderUin(process.env.QQ_UIN)) {
     process.exit(1);
   }
 }
+if (MUSIC_PROVIDER === 'netease' && !process.env.NETEASE_UID) {
+  console.warn('⚠️  没设 NETEASE_UID，拉歌单功能会不可用（但仍可搜歌/听歌）');
+  console.warn('   登录网易云后在浏览器打开 https://music.163.com，URL 里能看到 uid');
+  console.warn('   填到 vox/.env：NETEASE_UID=你的uid');
+}
 
-// ---------- 初始化各模块 ----------
-// 选择音乐源：默认 qq，未来可通过 MUSIC_PROVIDER 切换到 netease
-const MUSIC_PROVIDER = process.env.MUSIC_PROVIDER || 'qq';
-const music = createProvider(MUSIC_PROVIDER, {
-  apiBase: process.env.QQMUSIC_API_URL || 'http://127.0.0.1:3300',
-  userId: process.env.QQ_UIN,
-});
+// ---------- 初始化音乐 provider ----------
+/** @type {import('./src/music/index.js').MusicProvider} */
+let music;
+if (MUSIC_PROVIDER === 'qq') {
+  music = createProvider('qq', {
+    apiBase: process.env.QQMUSIC_API_URL || 'http://127.0.0.1:3300',
+    userId: process.env.QQ_UIN,
+  });
+} else {
+  music = createProvider('netease', {
+    userId: process.env.NETEASE_UID || '',
+    cookieFile: path.resolve(
+      __dirname,
+      '..',
+      'data',
+      'netease_cookie.txt'
+    ),
+  });
+}
 console.log(`[music] provider = ${music.kind}`);
+
+/**
+ * 启动时探一次 cookie 是否有效；没 cookie / 过期 → 立刻进熔断
+ * 必须在 server.listen 之前完成：避免前端在 probe 没回来时连上来，
+ * 触发一次无意义的冷启动 block 浪费 token
+ */
+async function probeAuthOnBoot() {
+  console.log('[music] 启动探测 cookie 状态...');
+  try {
+    const state = await music.probeAuth();
+    if (state === 'expired') {
+      console.log('[music] 启动探测：未登录 / cookie 过期 → 进入熔断（前端连上即弹登录窗）');
+      markAuthRequired(music.kind === 'netease' ? '尚未登录网易云' : 'cookie 已过期');
+    } else if (state === 'ok') {
+      console.log('[music] 启动探测：cookie 有效 ✓');
+      // probe 时 provider 可能从 cookie 里反查到了 userId（老 .env 没 NETEASE_UID 的情况），
+      // 把它持久化进 .env，下次启动就不用再反查
+      if (music.kind === 'netease' && !process.env.NETEASE_UID && typeof music.getCurrentUserId === 'function') {
+        const uid = music.getCurrentUserId();
+        if (uid) {
+          try {
+            const envPath = path.resolve(__dirname, '.env');
+            await upsertEnv(envPath, { NETEASE_UID: uid });
+            process.env.NETEASE_UID = uid;
+            console.log(`[music] 已把 NETEASE_UID=${uid} 补写进 .env`);
+          } catch (e) {
+            console.warn('[music] 补写 NETEASE_UID 到 .env 失败:', e.message);
+          }
+        }
+      }
+    } else {
+      console.log('[music] 启动探测：未知（可能网络问题），等真实失败时再判定');
+    }
+  } catch (e) {
+    console.warn('[music] 启动探测异常（忽略）:', e.message);
+  }
+}
+
+// 给前端看的 provider 信息（cookie 弹窗需要用来切换文案/站点）
+function providerInfo() {
+  return {
+    kind: music.kind,
+    instructions: music.cookieInstructions || null,
+    // 是否支持扫码登录（目前只有 netease）
+    supportsQrLogin: typeof music.startQrLogin === 'function'
+      && typeof music.checkQrLogin === 'function',
+  };
+}
 
 // 初始化 DB（单例），并清理过期缓存
 getDB(DATA_DIR);
@@ -188,7 +263,7 @@ function singleSender(ws) {
 // QQ cookie 熔断状态变化 → 广播给所有前端
 onAuthChange((evt) => {
   if (evt.required) {
-    broadcaster.send('qq_auth_required', { reason: evt.reason });
+    broadcaster.send('qq_auth_required', { reason: evt.reason, provider: providerInfo() });
   } else {
     broadcaster.send('qq_auth_ok', {});
   }
@@ -200,7 +275,7 @@ wss.on('connection', (ws) => {
 
   // 已处于 cookie 熔断 → 先通知新连上来的前端
   if (isAuthRequired()) {
-    solo.send('qq_auth_required', { reason: getAuthReason() });
+    solo.send('qq_auth_required', { reason: getAuthReason(), provider: providerInfo() });
   }
 
   // 如果已经有会话在跑 —— 恢复它（不打断播放）
@@ -221,16 +296,17 @@ wss.on('connection', (ws) => {
       hasNextBlock: !!session.nextBlock,
       lastDjSay: session.lastDjSay,
       weather: session.weather,
+      provider: providerInfo(),
     });
   } else if (inFlight) {
     // 没 block 但正在编 —— 告诉前端"稍等，马上来"
     console.log('[ws] 没 session 但正在编，告诉前端等待');
-    solo.send('hello', { resume: false, generating: true });
+    solo.send('hello', { resume: false, generating: true, provider: providerInfo() });
     // 不用再触发生成，等正在跑的那一次结束广播
   } else {
     // 真·冷启动：从没放过歌。才触发首段生成。
     console.log('[ws] 冷启动，生成第一段');
-    solo.send('hello', { resume: false, generating: true });
+    solo.send('hello', { resume: false, generating: true, provider: providerInfo() });
     generateAndSend(broadcaster).catch((e) => {
       console.error('[ws] initial generate fail', e);
       broadcaster.send('error', { message: e.message });
@@ -311,6 +387,95 @@ async function ensureUrlAsync(block, idx) {
   }
 }
 
+// ---------- 扫码登录（目前只有网易云支持） ----------
+// 同一时间只允许一个扫码会话进行中（避免多标签开多个 key 撞车）
+const QR_POLL_INTERVAL_MS = 2000;   // 轮询间隔
+const QR_MAX_POLL_MS = 5 * 60_000;  // 最长扫 5 分钟，超时自动放弃
+let _qrSession = null; // { key, timer, sender, startedAt, cancelled }
+
+function cancelQrLogin() {
+  if (!_qrSession) return;
+  _qrSession.cancelled = true;
+  if (_qrSession.timer) clearTimeout(_qrSession.timer);
+  console.log(`[qrlogin] 取消（key=${_qrSession.key?.slice(0, 8)}...）`);
+  _qrSession = null;
+}
+
+async function startQrLoginFlow(sender) {
+  // 已经在跑就先取消
+  if (_qrSession) {
+    console.log('[qrlogin] 已有会话，先取消重开');
+    cancelQrLogin();
+  }
+
+  console.log('[qrlogin] 申请二维码…');
+  const { key, qrDataUrl } = await music.startQrLogin();
+  console.log(`[qrlogin] 拿到 key=${key.slice(0, 8)}...，开始轮询`);
+
+  // 用广播：用户可能在多个标签开着，全都更新二维码状态
+  broadcaster.send('qr_login_qr', { qrDataUrl });
+
+  _qrSession = { key, timer: null, sender, startedAt: Date.now(), cancelled: false };
+
+  const poll = async () => {
+    if (!_qrSession || _qrSession.cancelled) return;
+    if (Date.now() - _qrSession.startedAt > QR_MAX_POLL_MS) {
+      broadcaster.send('qr_login_failed', { error: '扫码超时，请重新打开' });
+      _qrSession = null;
+      return;
+    }
+    let r;
+    try {
+      r = await music.checkQrLogin(_qrSession.key);
+    } catch (e) {
+      console.warn('[qrlogin] check 异常', e.message);
+      // 网络抖动不立即终止，下一轮再试
+      _qrSession.timer = setTimeout(poll, QR_POLL_INTERVAL_MS);
+      return;
+    }
+    if (!_qrSession || _qrSession.cancelled) return;
+
+    if (r.status === 'waiting') {
+      _qrSession.timer = setTimeout(poll, QR_POLL_INTERVAL_MS);
+      return;
+    }
+    if (r.status === 'scanned') {
+      // 已扫但未确认 → 通知前端，让二维码区域显示"已扫码，请在手机上确认"
+      broadcaster.send('qr_login_status', { status: 'scanned' });
+      _qrSession.timer = setTimeout(poll, QR_POLL_INTERVAL_MS);
+      return;
+    }
+    if (r.status === 'expired') {
+      broadcaster.send('qr_login_failed', { error: '二维码已过期，请重新打开' });
+      _qrSession = null;
+      return;
+    }
+    if (r.status === 'confirmed') {
+      console.log(`[qrlogin] ✅ 登录成功 ${r.nickname ? `(${r.nickname})` : ''}`);
+      _qrSession = null;
+      // 直接用 applyCookie 走标准落盘 + 解熔断流程
+      const result = await updateCookie({
+        provider: music,
+        cookieString: r.cookie || '',
+        dataDir: DATA_DIR,
+      });
+      if (result.ok) {
+        authFailWindow.length = 0;
+        broadcaster.send('qr_login_ok', {
+          userInfo: result.userInfo || { nickname: r.nickname, userId: r.userId },
+        });
+      } else {
+        broadcaster.send('qr_login_failed', {
+          error: 'cookie 验证失败：' + (result.error || '未知'),
+        });
+      }
+    }
+  };
+
+  // 启动第一次（异步，立即返回，让 server 继续处理其它消息）
+  _qrSession.timer = setTimeout(poll, QR_POLL_INTERVAL_MS);
+}
+
 /**
  * @param {*} sender
  * @param {string} userIntent  用户额外要求
@@ -325,7 +490,7 @@ async function generateAndSend(sender, userIntent = '', replace = false) {
   // cookie 熔断中：拒绝调大脑（省 token），只提示前端
   if (isAuthRequired()) {
     console.log('[block] 拒绝: QQ cookie 过期熔断中');
-    sender.send('qq_auth_required', { reason: getAuthReason() });
+    sender.send('qq_auth_required', { reason: getAuthReason(), provider: providerInfo() });
     return;
   }
   inFlight = true;
@@ -448,17 +613,14 @@ async function generateAndSend(sender, userIntent = '', replace = false) {
         (blockMajority ? `预热段 ${authFailCount}/${PREFETCH_URLS} 疑似 ` : '') +
         (windowOverflow ? `窗口累计 ${windowSum} ≥ ${AUTH_FAIL_THRESHOLD}` : '')
       );
-      const state = await probeCookieAlive({
-        apiBase: process.env.QQMUSIC_API_URL || 'http://127.0.0.1:3300',
-        uin: process.env.QQ_UIN,
-      });
-      console.log(`[qqauth] probe 结果: ${state}`);
+      const state = await probeCookieAlive(music);
+      console.log(`[musicauth] probe 结果: ${state}`);
       resetAuthFailSignals();
       authFailWindow.length = 0;
 
       if (state === 'expired') {
         markAuthRequired('cookie 已过期（probe 确认未登录）');
-        sender.send('qq_auth_required', { reason: 'cookie 已过期' });
+        sender.send('qq_auth_required', { reason: 'cookie 已过期', provider: providerInfo() });
         return;
       }
       if (state === 'ok' && !playable.length) {
@@ -848,9 +1010,9 @@ async function handleClientMessage(msg, sender) {
       const raw = String(data?.cookie || '');
       console.log(`[qqauth] 收到 cookie 更新请求，长度=${raw.length}`);
       const result = await updateCookie({
+        provider: music,
         cookieString: raw,
         dataDir: DATA_DIR,
-        apiBase: process.env.QQMUSIC_API_URL || 'http://127.0.0.1:3300',
       });
       sender.send('qq_cookie_update_result', result);
       if (result.ok) {
@@ -863,12 +1025,36 @@ async function handleClientMessage(msg, sender) {
       break;
     }
 
+    case 'qr_login_start': {
+      // 前端请求开启扫码登录（只有支持 startQrLogin 的 provider 能用，目前是网易云）
+      if (typeof music.startQrLogin !== 'function') {
+        sender.send('qr_login_failed', { error: '当前音乐源不支持扫码登录' });
+        break;
+      }
+      try {
+        startQrLoginFlow(sender).catch((e) => {
+          console.error('[qrlogin] flow 异常', e);
+          sender.send('qr_login_failed', { error: e.message });
+        });
+      } catch (e) {
+        sender.send('qr_login_failed', { error: e.message });
+      }
+      break;
+    }
+
+    case 'qr_login_cancel': {
+      // 前端关闭弹窗 → 停止当前轮询
+      cancelQrLogin();
+      break;
+    }
+
     default:
       console.warn('[ws] unknown message type', type);
   }
 }
 
 // ---------- 启动 ----------
+await probeAuthOnBoot();
 server.listen(PORT, () => {
   const brainBin = resolveBrainBin();
   const brainFlavor = getBrainFlavor();
@@ -876,7 +1062,7 @@ server.listen(PORT, () => {
 
   console.log(`🎧 Vox is running at http://localhost:${PORT}`);
   console.log(`   Data dir : ${DATA_DIR}`);
-  console.log(`   QQ API   : ${process.env.QQMUSIC_API_URL || 'http://127.0.0.1:3300'}`);
+  console.log(`   Music    : ${MUSIC_PROVIDER}${MUSIC_PROVIDER === 'qq' ? ` (${process.env.QQMUSIC_API_URL || 'http://127.0.0.1:3300'})` : ''}`);
   console.log(`   Weather  : ${process.env.ENABLE_WEATHER === 'true' ? 'on' : 'off'}`);
   console.log(`   Brain    : ${brainBin} (${brainFlavor})${brainConfigured ? '' : ' [默认值，未通过 setup:brain 选择]'}`);
   console.log(`   PWA      : http://localhost:${PORT}`);

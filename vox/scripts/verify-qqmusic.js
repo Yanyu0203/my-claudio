@@ -9,15 +9,26 @@
  */
 
 import 'dotenv/config';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { createProvider } from '../src/music/index.js';
 
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+
 const PROVIDER = process.env.MUSIC_PROVIDER || 'qq';
+const USER_ID = PROVIDER === 'netease'
+  ? process.env.NETEASE_UID
+  : process.env.QQ_UIN;
+
 const music = createProvider(PROVIDER, {
   apiBase: process.env.QQMUSIC_API_URL,
-  userId: process.env.QQ_UIN,
+  userId: USER_ID,
+  cookieFile: PROVIDER === 'netease'
+    ? path.resolve(__dirname, '..', '..', 'data', 'netease_cookie.txt')
+    : undefined,
 });
 
-console.log(`\n[verify] music provider = ${music.kind}\n`);
+console.log(`\n[verify] music provider = ${music.kind}, userId=${USER_ID || '(空)'}\n`);
 
 const line = (t) => console.log('\n========== ' + t + ' ==========');
 const ok = (m) => console.log('  ✅ ' + m);

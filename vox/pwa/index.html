@@ -1239,6 +1239,65 @@
   }
   .qqauth-msg.err { color: var(--warn, #ffb800); }
   .qqauth-msg.ok { color: var(--neon-pri); }
+
+  /* 扫码登录区 */
+  .qrlogin-section {
+    margin: 14px 0 4px;
+    padding: 12px 14px;
+    background: rgba(255,255,255,.03);
+    border: 1px solid rgba(255,255,255,.08);
+    border-radius: 4px;
+  }
+  .qrlogin-section h4 { margin-top: 0 !important; color: var(--neon-pri); }
+  .qrlogin-row { display: flex; gap: 14px; align-items: center; }
+  .qrlogin-qr {
+    width: 160px; height: 160px; flex-shrink: 0;
+    background: rgba(255,255,255,.04);
+    border: 1px dashed rgba(255,255,255,.18);
+    border-radius: 4px;
+    display: flex; align-items: center; justify-content: center;
+    overflow: hidden;
+  }
+  .qrlogin-qr img { width: 100%; height: 100%; object-fit: contain; }
+  .qrlogin-qr .btn { font-size: 11px; padding: 8px 14px; }
+  .qrlogin-tip {
+    flex: 1; font-size: 11px; line-height: 1.7; color: var(--fg-dim);
+  }
+  .qrlogin-tip strong { color: var(--fg); }
+  .qrlogin-status {
+    margin-top: 8px;
+    padding: 6px 10px;
+    background: rgba(0,0,0,.25);
+    border-left: 2px solid var(--neon-pri);
+    font-family: inherit;
+    font-size: 11px;
+    color: var(--fg);
+  }
+  .qrlogin-status.scanned { border-left-color: var(--warn, #ffb800); }
+  .qrlogin-status.ok      { border-left-color: var(--neon-pri); color: var(--neon-pri); }
+  .qrlogin-status.err     { border-left-color: var(--warn, #ffb800); color: var(--warn, #ffb800); }
+
+  /* 手动粘贴折叠区 */
+  .qqauth-manual {
+    margin-top: 14px;
+    border-top: 1px solid rgba(255,255,255,.08);
+    padding-top: 10px;
+  }
+  .qqauth-manual > summary {
+    font-size: 11px;
+    color: var(--fg-dim);
+    cursor: pointer;
+    user-select: none;
+    padding: 4px 0;
+    list-style: none;
+  }
+  .qqauth-manual > summary::before {
+    content: '▸ ';
+    color: var(--neon-pri);
+    margin-right: 4px;
+  }
+  .qqauth-manual[open] > summary::before { content: '▾ '; }
+  .qqauth-manual > summary::-webkit-details-marker { display: none; }
 </style>
 </head>
 <body class="theme-cyber">
@@ -1453,31 +1512,49 @@
   </div>
 </div>
 
-<!-- QQ Cookie 失效 Modal -->
+<!-- 音乐源 Cookie 失效 Modal -->
 <div id="qqAuthModal" class="history-modal qqauth-modal">
   <div class="history-backdrop"></div>
   <div class="history-panel">
     <div class="history-head">
-      <div class="history-title">⚠ QQ COOKIE 失效</div>
+      <div class="history-title" id="qqAuthTitle">⚠ COOKIE 失效</div>
       <button id="qqAuthClose" class="history-close" title="先关闭（Vox 会暂停推荐，下次恢复后需手动触发）">✕</button>
     </div>
     <div class="qqauth-body">
       <h4>发生了什么？</h4>
-      Vox 连接 QQ 音乐用的 cookie 已过期或无效，拿不到歌曲直链。
+      Vox 连接<span id="qqAuthSiteName">音乐</span>用的 cookie 已过期或无效，拿不到歌曲直链。
       为了不浪费大脑额度，<strong>Vox 已暂停推荐新歌单</strong>。
-      粘贴新 cookie 即可恢复。
+      <span id="qqAuthHint">粘贴新 cookie 即可恢复。</span>
       <div class="qqauth-reason" id="qqAuthReason">（熔断原因会显示在这里）</div>
 
-      <h4>怎么复制新 cookie（30 秒）</h4>
-      <ol>
-        <li>浏览器登录 <code>https://y.qq.com</code></li>
-        <li>按 <code>F12</code> 打开开发者工具 → <strong>Network</strong> 标签</li>
-        <li>页面随便点一下（比如点"我的音乐"）让它产生请求</li>
-        <li>随便点一个请求 → 右侧 <strong>Headers</strong> → 翻到 <strong>Request Headers</strong> → 找到 <code>Cookie:</code> 那行</li>
-        <li>复制整段（通常很长，要包含 <code>uin=</code> 和 <code>qm_keyst=</code>），粘贴到下面 ↓</li>
-      </ol>
+      <!-- 扫码登录区（默认隐藏，netease 才显示） -->
+      <div id="qrLoginSection" class="qrlogin-section" style="display: none">
+        <h4>扫码登录（推荐）</h4>
+        <div class="qrlogin-row">
+          <div class="qrlogin-qr" id="qrLoginQrBox">
+            <button id="qrLoginStart" class="btn">点这里生成二维码</button>
+          </div>
+          <div class="qrlogin-tip">
+            <div>用<strong>网易云音乐手机 App</strong> →「我的」→「右上角扫一扫」</div>
+            <div class="qrlogin-status" id="qrLoginStatus">点左侧按钮生成二维码</div>
+          </div>
+        </div>
+      </div>
 
-      <textarea id="qqAuthInput" class="qqauth-textarea" spellcheck="false" placeholder="把整段 cookie 粘在这里…（以 pgv_pvid=... 开头，分号分隔）"></textarea>
+      <details id="qqAuthManualWrap" class="qqauth-manual">
+        <summary>手动粘贴 cookie（备用）</summary>
+        <h4>怎么复制 cookie（30 秒）</h4>
+        <ol>
+          <li>浏览器登录 <code id="qqAuthSiteUrl">https://y.qq.com</code></li>
+          <li>按 <code>F12</code> 打开开发者工具 → <strong>Network</strong> 标签</li>
+          <li>页面随便点一下（比如点"我的音乐"）让它产生请求</li>
+          <li>随便点一个请求 → 右侧 <strong>Headers</strong> → 翻到 <strong>Request Headers</strong> → 找到 <code>Cookie:</code> 那行</li>
+          <li>复制整段（必须包含 <code id="qqAuthFields">uin=, qm_keyst=</code>），粘贴到下面 ↓</li>
+        </ol>
+        <div class="qqauth-reason" id="qqAuthExtraNote" style="display: none"></div>
+
+        <textarea id="qqAuthInput" class="qqauth-textarea" spellcheck="false" placeholder="把整段 cookie 粘在这里…"></textarea>
+      </details>
     </div>
     <div class="qqauth-actions">
       <div id="qqAuthMsg" class="qqauth-msg">粘贴后点"更新并恢复"</div>

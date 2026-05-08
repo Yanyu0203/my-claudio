@@ -281,9 +281,9 @@ function handleServer({ type, data }) {
       console.error(data);
       break;
     case 'qq_auth_required':
-      showQQAuthModal(data?.reason || '');
+      showQQAuthModal(data?.reason || '', data?.provider || null);
       hideLoading();
-      setStatus('QQ COOKIE 失效 // 等待更新');
+      setStatus('COOKIE 失效 // 等待更新');
       break;
     case 'qq_auth_ok':
       hideQQAuthModal();
@@ -291,6 +291,18 @@ function handleServer({ type, data }) {
       break;
     case 'qq_cookie_update_result':
       handleQQCookieUpdateResult(data);
+      break;
+    case 'qr_login_qr':
+      handleQrLoginQr(data);
+      break;
+    case 'qr_login_status':
+      handleQrLoginStatus(data);
+      break;
+    case 'qr_login_ok':
+      handleQrLoginOk(data);
+      break;
+    case 'qr_login_failed':
+      handleQrLoginFailed(data);
       break;
     case 'song_url_ready':
       handleSongUrlReady(data);
@@ -308,6 +320,9 @@ let helloHandled = false; // 同一进程内只处理一次首屏恢复
 
 function handleHello(data) {
   console.log('[hello]', data);
+
+  // 缓存 provider 信息，用于动态渲染 cookie 弹窗文案
+  if (data.provider) currentProviderInfo = data.provider;
 
   if (helloHandled) {
     // 第二次以后（重连），如果 server 还有 session 就静默同步
@@ -1508,13 +1523,63 @@ function getComputedChatHeight() {
 // ============================================================
 // QQ Cookie 失效弹窗
 // ============================================================
-function showQQAuthModal(reason) {
+// 进程内缓存 provider 信息（hello 时就拿到，弹窗 / 文案都用它）
+let currentProviderInfo = null;
+
+function showQQAuthModal(reason, provider) {
   const modal = $('qqAuthModal');
   if (!modal) return;
+
+  // provider 优先用本次传进来的；否则 fallback 到 hello 里收的
+  const p = provider || currentProviderInfo || {
+    kind: 'qq',
+    instructions: { siteUrl: 'https://y.qq.com', siteName: 'QQ 音乐', requiredFields: ['uin', 'qm_keyst'] },
+  };
+  const inst = p.instructions || {};
+  const site = inst.siteName || (p.kind === 'netease' ? '网易云音乐' : 'QQ 音乐');
+  const siteUrl = inst.siteUrl || (p.kind === 'netease' ? 'https://music.163.com' : 'https://y.qq.com');
+  const fields = (inst.requiredFields || []).join(', ') || 'cookie 所有字段';
+
+  const title = $('qqAuthTitle');
+  if (title) title.textContent = `⚠ ${site.toUpperCase()} COOKIE 失效`;
+  const siteNameEl = $('qqAuthSiteName');
+  if (siteNameEl) siteNameEl.textContent = site;
+  const siteUrlEl = $('qqAuthSiteUrl');
+  if (siteUrlEl) siteUrlEl.textContent = siteUrl;
+  const fieldsEl = $('qqAuthFields');
+  if (fieldsEl) fieldsEl.textContent = fields;
+  const extraEl = $('qqAuthExtraNote');
+  if (extraEl) {
+    if (inst.extraNote) {
+      extraEl.textContent = '💡 ' + inst.extraNote;
+      extraEl.style.display = '';
+    } else {
+      extraEl.style.display = 'none';
+    }
+  }
+
   const reasonEl = $('qqAuthReason');
   if (reasonEl) {
     reasonEl.textContent = reason ? `原因：${reason}` : '（未报告具体原因）';
   }
+
+  // 扫码登录区：仅 provider 支持时显示
+  const qrSec = $('qrLoginSection');
+  const manualWrap = $('qqAuthManualWrap');
+  const hint = $('qqAuthHint');
+  if (qrSec && p.supportsQrLogin) {
+    qrSec.style.display = '';
+    // 主推扫码 → 默认折叠手动粘贴区
+    if (manualWrap) manualWrap.removeAttribute('open');
+    if (hint) hint.textContent = '推荐用网易云手机 App 扫一下二维码，30 秒搞定。';
+    resetQrLoginUI();
+  } else {
+    if (qrSec) qrSec.style.display = 'none';
+    // 不支持扫码 → 把手动粘贴区默认展开
+    if (manualWrap) manualWrap.setAttribute('open', '');
+    if (hint) hint.textContent = '粘贴新 cookie 即可恢复。';
+  }
+
   const msg = $('qqAuthMsg');
   if (msg) {
     msg.textContent = '粘贴后点"更新并恢复"';
@@ -1523,7 +1588,6 @@ function showQQAuthModal(reason) {
   const submit = $('qqAuthSubmit');
   if (submit) submit.disabled = false;
   modal.classList.add('show');
-  // 自动 focus textarea（方便直接粘贴）
   setTimeout(() => $('qqAuthInput')?.focus(), 50);
 }
 
@@ -1534,6 +1598,92 @@ function hideQQAuthModal() {
   // 清掉输入框内容，避免 cookie 残留在 DOM
   const input = $('qqAuthInput');
   if (input) input.value = '';
+  // 通知 server 停止扫码轮询（如果在扫）
+  if (qrLoginActive) {
+    send('qr_login_cancel', {});
+    qrLoginActive = false;
+  }
+}
+
+// ---- 扫码登录 ----
+let qrLoginActive = false;
+
+function resetQrLoginUI() {
+  const box = $('qrLoginQrBox');
+  const status = $('qrLoginStatus');
+  if (box) {
+    box.innerHTML = '<button id="qrLoginStart" class="btn">点这里生成二维码</button>';
+    // innerHTML 重渲后要重绑事件
+    $('qrLoginStart')?.addEventListener('click', startQrLogin);
+  }
+  if (status) {
+    status.textContent = '点左侧按钮生成二维码';
+    status.className = 'qrlogin-status';
+  }
+  qrLoginActive = false;
+}
+
+function startQrLogin() {
+  const box = $('qrLoginQrBox');
+  const status = $('qrLoginStatus');
+  if (box) box.innerHTML = '<div style="font-size:11px;color:var(--fg-dim)">生成中…</div>';
+  if (status) {
+    status.textContent = '正在申请二维码…';
+    status.className = 'qrlogin-status';
+  }
+  qrLoginActive = true;
+  send('qr_login_start', {});
+}
+
+function handleQrLoginQr(data) {
+  const box = $('qrLoginQrBox');
+  const status = $('qrLoginStatus');
+  if (box && data?.qrDataUrl) {
+    box.innerHTML = `<img src="${data.qrDataUrl}" alt="扫码登录">`;
+  }
+  if (status) {
+    status.textContent = '请用网易云音乐手机 App 扫描二维码';
+    status.className = 'qrlogin-status';
+  }
+}
+
+function handleQrLoginStatus(data) {
+  const status = $('qrLoginStatus');
+  if (!status) return;
+  if (data?.status === 'scanned') {
+    status.textContent = '✓ 已扫码，请在手机上确认';
+    status.className = 'qrlogin-status scanned';
+  }
+}
+
+function handleQrLoginOk(data) {
+  const status = $('qrLoginStatus');
+  qrLoginActive = false;
+  if (status) {
+    const nick = data?.userInfo?.nickname || '';
+    status.textContent = nick ? `✓ 登录成功（${nick}），恢复推荐中…` : '✓ 登录成功，恢复推荐中…';
+    status.className = 'qrlogin-status ok';
+  }
+  // 1.5 秒后关闭弹窗 + 触发新 block
+  setTimeout(() => {
+    hideQQAuthModal();
+    send('request_block', {});
+  }, 1500);
+}
+
+function handleQrLoginFailed(data) {
+  const status = $('qrLoginStatus');
+  qrLoginActive = false;
+  if (status) {
+    status.textContent = '✗ ' + (data?.error || '扫码失败');
+    status.className = 'qrlogin-status err';
+  }
+  // 把"重新生成"按钮放回 box
+  const box = $('qrLoginQrBox');
+  if (box) {
+    box.innerHTML = '<button id="qrLoginStart" class="btn">重新生成二维码</button>';
+    $('qrLoginStart')?.addEventListener('click', startQrLogin);
+  }
 }
 
 function handleQQCookieUpdateResult(result) {
@@ -1598,6 +1748,9 @@ function setupQQAuthUI() {
   };
   closeBtn?.addEventListener('click', softClose);
   backdrop?.addEventListener('click', softClose);
+
+  // 扫码登录"生成二维码"按钮（首次绑定；后续 innerHTML 重渲后由 reset/handleFailed 里重绑）
+  $('qrLoginStart')?.addEventListener('click', startQrLogin);
 }
 
 setupQQAuthUI();

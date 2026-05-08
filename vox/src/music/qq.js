@@ -13,7 +13,7 @@
  *   dirid=201 → isFavorite=true
  *   uin      → userId
  */
-import { reportAuthFailSignal, resetAuthFailSignals } from '../qqauth.js';
+import { reportAuthFailSignal, resetAuthFailSignals } from '../musicauth.js';
 
 const DEFAULT_API_BASE = 'http://localhost:3300';
 const TENCENT_MUSICU = 'https://u.y.qq.com/cgi-bin/musicu.fcg';
@@ -327,11 +327,105 @@ export function createQQProvider(opts = {}) {
     };
   }
 
+  // ---------- cookie 相关（通用 auth 接口） ----------
+
+  /**
+   * 把新 cookie 推给本地 QQMusicApi 并验证能拿直链
+   * 验证成功后，调用方（musicauth）应负责落盘到 data/qq_cookie.json
+   * @param {string} cookieString  浏览器复制的完整 cookie 文本
+   * @returns {Promise<{ok: boolean, error?: string, toWrite?: {path: string, content: string}}>}
+   */
+  async function applyCookie(cookieString) {
+    const raw = String(cookieString || '').trim();
+    if (!raw) return { ok: false, error: 'cookie 不能为空' };
+
+    // 校验关键字段
+    const required = ['uin', 'qm_keyst'];
+    const missing = required.filter((k) => !new RegExp(`(^|;\\s*)${k}=`).test(raw));
+    if (missing.length) {
+      return {
+        ok: false,
+        error: `cookie 缺少关键字段: ${missing.join(', ')}（从浏览器复制时要完整）`,
+      };
+    }
+
+    const payload = JSON.stringify({ data: raw });
+
+    // 推给 QQMusicApi
+    let res;
+    try {
+      res = await fetch(apiBase + '/user/setCookie', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: payload,
+      });
+    } catch (e) {
+      return { ok: false, error: `连不上 QQMusicApi (${apiBase}): ${e.message}` };
+    }
+    if (!res.ok) return { ok: false, error: `QQMusicApi /user/setCookie HTTP ${res.status}` };
+    const setJson = await res.json().catch(() => ({}));
+    if (setJson.result !== 100) {
+      return { ok: false, error: `setCookie 响应异常: ${JSON.stringify(setJson).slice(0, 200)}` };
+    }
+
+    // 验证：拿水星记（郭顶）直链
+    try {
+      const vRes = await fetch(apiBase + '/song/url?id=00485V8K4InqbZ');
+      const vJson = await vRes.json().catch(() => ({}));
+      if (typeof vJson?.data !== 'string' || !vJson.data.startsWith('http')) {
+        return {
+          ok: false,
+          error: `cookie 写入成功但拿不到直链（${vJson?.errMsg || '可能 cookie 还是过期的'}），请重新从浏览器复制完整 cookie`,
+        };
+      }
+    } catch (e) {
+      return { ok: false, error: `验证直链失败: ${e.message}` };
+    }
+
+    return {
+      ok: true,
+      toWrite: { fileName: 'qq_cookie.json', content: payload + '\n' },
+    };
+  }
+
+  /**
+   * 主动探测 cookie 是否真的过期（不依赖 getPlayUrl）
+   * @returns {Promise<'ok' | 'expired' | 'unknown'>}
+   */
+  async function probeAuth() {
+    if (!defaultUserId) return 'unknown';
+    try {
+      const url = apiBase + '/user/detail?id=' + encodeURIComponent(defaultUserId);
+      const res = await fetch(url, { signal: AbortSignal.timeout(8000) });
+      if (!res.ok) return 'unknown';
+      const json = await res.json().catch(() => ({}));
+      if (json?.result === 301 || json?.code === 1000 || /未登/.test(json?.errMsg || '')) {
+        return 'expired';
+      }
+      if (json?.result === 100 && json?.data) return 'ok';
+      return 'unknown';
+    } catch (e) {
+      console.warn('[qq] probe 异常:', e.message);
+      return 'unknown';
+    }
+  }
+
+  /** 给前端弹窗显示的 cookie 获取说明 */
+  const cookieInstructions = {
+    siteUrl: 'https://y.qq.com',
+    siteName: 'QQ 音乐',
+    requiredFields: ['uin', 'qm_keyst'],
+    extraNote: 'cookie 里若有 a_sk__xxx="01xxx" 这种带双引号的字段，复制时可能破坏 JSON，可删',
+  };
+
   return {
     kind: 'qq',
     search,
     getPlayUrl,
     getMyPlaylists,
     getPlaylistSongs,
+    applyCookie,
+    probeAuth,
+    cookieInstructions,
   };
 }

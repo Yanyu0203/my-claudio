@@ -123,6 +123,14 @@ codebuddy -p "用一句话说你好"
 
 这是 Vox 的"曲库"。
 
+> 💡 Vox 支持两种音乐源，二选一：
+> - **QQ 音乐** — 本节内容，需要本地跑 QQMusicApi 服务
+> - **网易云音乐**（推荐新手）— 见本节末尾 [3.7 可选：改用网易云音乐](#37-可选改用网易云音乐)，无额外服务，**扫码登录**
+>
+> 实际操作时**你什么都不用在这里选**：首次跑 `./start.sh` 时它会自动弹出选择菜单（1=QQ 音乐 / 2=网易云），选完会写进 `vox/.env`。想改回来，删掉 `.env` 里 `MUSIC_PROVIDER=` 那一行再启动，或跑 `cd vox && npm run setup:provider`。
+>
+> 两种源的 API 对 Vox 来说完全透明，换源只需改一个环境变量。
+
 > 💡 **好消息**：`QQMusicApi/` 代码已经**随 my-vox 仓库一起**发下来了，`yarn.lock` 里的源也**已经替换为国内镜像**，你不用再 clone 也不用 sed 替换源，直接装依赖即可。
 
 ### 3.1 进到 QQMusicApi 目录
@@ -243,6 +251,47 @@ npm run verify:qq
 - 第一个歌单能拉出歌曲
 
 如果有 ❌，对照 [常见错误](#常见错误对照表)。
+
+### 3.7 可选：改用网易云音乐
+
+如果你**不想**用 QQ 音乐，或者你的歌单主要在网易云，可以整节跳过上面的 QQMusicApi/cookie 步骤，改用网易云。
+
+> 💡 **最简单的方式**：直接跑 `./start.sh`，首次启动它会弹出选择菜单，选 `2`（网易云），其余全自动。下面的手动步骤是给想自己编辑 `.env` 的人看的。
+
+1. **拿到 `api-enhanced/` 代码并装依赖** — 这是网易云非官方 API，**不打包进本仓库**（避免和上游冲突）。`./start.sh` 第一次跑 netease 模式时会**自动 clone + checkout 到 pin 的 commit**（保证你拿到的是 Vox 测过的版本，不会被上游 breaking 坑），也可手动：
+
+```bash
+# 在项目根目录下（my-claudio/）
+git clone https://github.com/NeteaseCloudMusicApiEnhanced/api-enhanced.git
+cd api-enhanced
+git checkout 15fa49a2e8e63456a58e0ec1e81f7283176bd4b2   # 当前 Vox 测过的 pin
+npm install
+```
+
+> 💡 想抢鲜用上游最新版？跑 `cd api-enhanced && git checkout main && git pull` 即可（自负风险）。详见 README "网易云 API 版本管理" 一节。
+
+2. **在 `vox/.env` 里把音乐源切到 netease**（也可以跑 `cd vox && npm run setup:provider` 让脚本帮你写）：
+
+```
+MUSIC_PROVIDER=netease
+NETEASE_UID=你的网易云 uid
+```
+
+- `NETEASE_UID` 怎么找：登录 https://music.163.com 后，点自己的头像进个人主页，浏览器 URL 最后那串数字就是 uid（比如 `https://music.163.com/#/user/home?id=12345678`，uid = `12345678`）
+- 如果不填 `NETEASE_UID` 也能听（搜歌+非 VIP 直链不受影响），但拉不到你的个人歌单
+
+3. **首次登录（给 VIP / 版权歌）**：启动 Vox 后它会弹 cookie 向导。
+
+   网易云有个**比 QQ 体验好得多的福利**：弹窗里点「点这里生成二维码」→ 用网易云音乐手机 App 扫一下（「我的」→ 右上角「扫一扫」）→ 手机上点确认，30 秒搞定，不用复制 cookie。
+
+   嫌扫码烦也可以走老路（弹窗下方"手动粘贴 cookie"折叠区）：去 `https://music.163.com` 复制 cookie，关键字段是 `MUSIC_U=`。
+
+4. 验证：
+
+```bash
+cd vox
+MUSIC_PROVIDER=netease npm run verify:qq   # 脚本名还叫 verify:qq，但它会按当前 provider 工作
+```
 
 ---
 
